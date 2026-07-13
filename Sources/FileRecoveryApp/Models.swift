@@ -4,7 +4,15 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
     case jpeg = "JPEG"
     case png = "PNG"
     case heic = "HEIC"
-    case video = "Video"
+    case raw = "RAW"
+    case bmp = "BMP"
+    case video = "MP4 / MOV"
+    case avi = "AVI"
+    case wmv = "WMV / ASF"
+    case flv = "FLV"
+    case webm = "WebM / MKV"
+    case mpeg = "MPEG"
+    case zip = "ZIP"
 
     var id: String { rawValue }
 
@@ -13,25 +21,75 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
         case .jpeg: "jpg"
         case .png: "png"
         case .heic: "heic"
-        case .video: "mov"
+        case .raw: "tif"
+        case .bmp: "bmp"
+        case .video: "mp4"
+        case .avi: "avi"
+        case .wmv: "wmv"
+        case .flv: "flv"
+        case .webm: "webm"
+        case .mpeg: "mpg"
+        case .zip: "zip"
         }
     }
+
+    /// Extensions that mean "this whole source file already is this kind".
+    var knownExtensions: Set<String> {
+        switch self {
+        case .jpeg: ["jpg", "jpeg"]
+        case .png: ["png"]
+        case .heic: ["heic", "heif"]
+        case .raw: ["tif", "tiff", "nef", "cr2", "arw", "dng", "3fr", "raf"]
+        case .bmp: ["bmp"]
+        case .video: ["mov", "mp4", "m4v", "3gp", "3g2"]
+        case .avi: ["avi"]
+        case .wmv: ["wmv", "asf"]
+        case .flv: ["flv"]
+        case .webm: ["webm", "mkv"]
+        case .mpeg: ["mpg", "mpeg"]
+        case .zip: ["zip"]
+        }
+    }
+}
+
+enum ScanTarget: Equatable, Sendable {
+    case path(URL)
+    case device(ExternalDevice)
+}
+
+struct ScanRegion: Sendable {
+    let source: ScanSource
+    let range: Range<UInt64>
+}
+
+struct ScanPlan: Sendable {
+    let regions: [ScanRegion]
+    let note: String?
+    var deletedFiles: [UInt64: DeletedFileEntry] = [:]
 }
 
 struct RecoveredItem: Identifiable, Hashable, Sendable {
     let id = UUID()
     let kind: MediaKind
-    let sourceURL: URL
+    let source: ScanSource
     let byteOffset: UInt64
     let byteLength: UInt64
+    let fileExtension: String
+    let originalFilename: String?
     var recoveredURL: URL?
+    var recoveryError: String?
 
     var displayName: String {
-        "\(kind.rawValue.lowercased())-\(String(byteOffset, radix: 16)).\(kind.fileExtension)"
+        originalFilename
+            ?? "\(kind.rawValue.split(separator: " ").first.map(String.init)?.lowercased() ?? "item")-\(String(byteOffset, radix: 16)).\(fileExtension)"
     }
 
     var sizeLabel: String {
         ByteCountFormatter.string(fromByteCount: Int64(byteLength), countStyle: .file)
+    }
+
+    var filenameLabel: String {
+        originalFilename ?? "Not Available"
     }
 }
 

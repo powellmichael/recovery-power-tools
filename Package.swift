@@ -14,6 +14,11 @@ let package = Package(
         .executableTarget(
             name: "FileRecoveryApp",
             path: "Sources/FileRecoveryApp"
+        ),
+        .testTarget(
+            name: "FileRecoveryAppTests",
+            dependencies: ["FileRecoveryApp"],
+            path: "Tests/FileRecoveryAppTests"
         )
     ]
 )
