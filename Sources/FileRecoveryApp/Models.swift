@@ -33,6 +33,14 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Kinds the app can render an image preview for.
+    var isPreviewable: Bool {
+        switch self {
+        case .jpeg, .png, .heic, .bmp: true
+        default: false
+        }
+    }
+
     /// Extensions that mean "this whole source file already is this kind".
     var knownExtensions: Set<String> {
         switch self {

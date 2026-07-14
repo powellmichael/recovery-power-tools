@@ -19,6 +19,7 @@ final class RecoveryViewModel: ObservableObject {
     @Published var scanNote: String?
     @Published var filenameFilter = ""
     @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = []
+    @Published var isPreviewPaneVisible = true
 
     var filteredItems: [RecoveredItem] {
         var visible = items
@@ -268,6 +269,23 @@ final class RecoveryViewModel: ObservableObject {
         selectItem(visible[newIndex].id)
     }
 
+    /// Preview-column click: select the row and make sure the pane is shown.
+    func showDetails(for item: RecoveredItem) {
+        selectItem(item.id)
+        isPreviewPaneVisible = true
+    }
+
+    /// Details-column click: toggles the pane when re-clicking the selected
+    /// row, otherwise selects the row and shows the pane.
+    func toggleDetails(for item: RecoveredItem) {
+        if isPreviewPaneVisible && selectedItemID == item.id {
+            isPreviewPaneVisible = false
+        } else {
+            selectItem(item.id)
+            isPreviewPaneVisible = true
+        }
+    }
+
     func selectItem(_ itemID: RecoveredItem.ID?) {
         selectedItemID = itemID
         guard let item = selectedItem else {
@@ -345,9 +363,7 @@ final class RecoveryViewModel: ObservableObject {
         previewFileURL = nil
         previewError = nil
 
-        guard item.kind == .jpeg || item.kind == .png || item.kind == .heic || item.kind == .bmp else {
-            return
-        }
+        guard item.kind.isPreviewable else { return }
 
         let scanner = scanner
         previewTask = Task {

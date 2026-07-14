@@ -285,11 +285,19 @@ private struct ResultsView: View {
                         }
                         .width(min: 150, ideal: 200)
 
-                        TableColumn("Offset") { item in
-                            Text("0x\(String(item.byteOffset, radix: 16).uppercased())")
-                                .font(.system(.body, design: .monospaced))
+                        TableColumn("Preview") { item in
+                            if item.kind.isPreviewable {
+                                Button {
+                                    viewModel.showDetails(for: item)
+                                } label: {
+                                    Image(systemName: "photo")
+                                        .foregroundStyle(.tint)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Show preview")
+                            }
                         }
-                        .width(min: 120, ideal: 150)
+                        .width(52)
 
                         TableColumn("Size", value: \.byteLength) { item in
                             Text(item.sizeLabel)
@@ -313,11 +321,25 @@ private struct ResultsView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+
+                        TableColumn("Details") { item in
+                            Button {
+                                viewModel.toggleDetails(for: item)
+                            } label: {
+                                Image(systemName: "info.circle")
+                                    .foregroundStyle(.tint)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Show or hide details")
+                        }
+                        .width(48)
                     }
                     .frame(minWidth: 600)
 
-                    PreviewPane(viewModel: viewModel)
-                        .frame(minWidth: 260, idealWidth: 320, maxWidth: 420)
+                    if viewModel.isPreviewPaneVisible {
+                        PreviewPane(viewModel: viewModel)
+                            .frame(minWidth: 260, idealWidth: 320, maxWidth: 420)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 14)
@@ -383,8 +405,7 @@ private struct PreviewPane: View {
                 .resizable()
                 .scaledToFit()
                 .padding(10)
-        } else if let item = viewModel.selectedItem,
-                  ![MediaKind.jpeg, .png, .heic, .bmp].contains(item.kind) {
+        } else if let item = viewModel.selectedItem, !item.kind.isPreviewable {
             VStack(spacing: 10) {
                 Image(systemName: icon(for: item.kind))
                     .font(.system(size: 42))
