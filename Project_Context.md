@@ -78,11 +78,8 @@ parsing on a synthetic image.
 
 ## Feature Backlog
 
-- **Phase 4: NTFS support.** Parse the boot sector + $Bitmap for free space
-  (restores the deleted-only guarantee on NTFS drives) and scan MFT records
-  for deleted entries: filenames, exact sizes, and data runs (handles
-  fragmented files, unlike the exFAT path). Currently NTFS drives fall back
-  to whole-device carving with no names and possible live-file results.
+(empty — NTFS support shipped in phase 4: $Bitmap free space, MFT deleted
+entries with names/exact sizes, fragmented-file recovery via data runs)
 
 ## Recommended Next Steps
 

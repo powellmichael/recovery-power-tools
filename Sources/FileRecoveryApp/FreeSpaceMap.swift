@@ -5,6 +5,9 @@ import Foundation
 struct DeletedFileEntry: Sendable, Equatable {
     let name: String
     let length: UInt64
+    /// Disk byte ranges holding the data when the file was fragmented
+    /// (NTFS data runs); nil means a single contiguous range at the key offset.
+    var segments: [Range<UInt64>]? = nil
 }
 
 /// Free (unallocated) byte regions of a volume. Anything carved from these
@@ -13,6 +16,9 @@ struct FreeSpaceMap: Sendable {
     let filesystem: String
     let regions: [Range<UInt64>]
     var deletedFiles: [UInt64: DeletedFileEntry] = [:]
+    /// Volume serial number from the boot sector — a stable identity for
+    /// tracking recoveries across scans and re-mounts.
+    var volumeSerial: UInt64 = 0
 
     var freeBytes: UInt64 {
         regions.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
@@ -26,6 +32,9 @@ struct FreeSpaceMap: Sendable {
 
         if matchASCII(boot, at: 3, "EXFAT   ") {
             return try exfat(source, boot: boot)
+        }
+        if matchASCII(boot, at: 3, "NTFS    ") {
+            return try NTFS.map(source, boot: boot)
         }
         if matchASCII(boot, at: 82, "FAT32   ") {
             return try fat32(source, boot: boot)
@@ -71,7 +80,7 @@ struct FreeSpaceMap: Sendable {
         }
 
         let regions = mergedRegions(freeClusters: freeClusters, dataStart: dataStart, clusterBytes: clusterBytes, deviceSize: source.size)
-        return FreeSpaceMap(filesystem: "FAT32", regions: regions)
+        return FreeSpaceMap(filesystem: "FAT32", regions: regions, volumeSerial: UInt64(le32(boot, 67)))
     }
 
     // MARK: - exFAT
@@ -131,7 +140,7 @@ struct FreeSpaceMap: Sendable {
             clusterCount: clusterCount,
             rootDirCluster: rootDirCluster
         )) ?? [:]
-        return FreeSpaceMap(filesystem: "exFAT", regions: regions, deletedFiles: deletedFiles)
+        return FreeSpaceMap(filesystem: "exFAT", regions: regions, deletedFiles: deletedFiles, volumeSerial: UInt64(le32(boot, 100)))
     }
 
     /// Walks the exFAT directory tree collecting deleted-file entry sets

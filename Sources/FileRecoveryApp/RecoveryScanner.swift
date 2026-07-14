@@ -52,7 +52,8 @@ struct RecoveryScanner: Sendable {
         return ScanPlan(
             regions: map.regions.map { ScanRegion(source: source, range: $0) },
             note: "\(map.filesystem) volume — scanning \(sizeLabel) of free space. Everything found is deleted data.\(namesNote)",
-            deletedFiles: map.deletedFiles
+            deletedFiles: map.deletedFiles,
+            volumeID: map.volumeSerial
         )
     }
 
@@ -89,7 +90,8 @@ struct RecoveryScanner: Sendable {
                     byteOffset: offset,
                     byteLength: min(entry.length, source.size - offset),
                     fileExtension: nameExt.isEmpty ? (sniffExt ?? kind.fileExtension) : nameExt,
-                    originalFilename: entry.name
+                    originalFilename: entry.name,
+                    segments: entry.segments
                 )
                 claimed.append(item)
                 allItems.append(item)
@@ -807,13 +809,21 @@ struct RecoveryScanner: Sendable {
         let writer = try FileHandle(forWritingTo: outputURL)
         defer { try? writer.close() }
 
-        var written: UInt64 = 0
-        while written < item.byteLength {
-            let want = Int(min(UInt64(chunkSize), item.byteLength - written))
-            let data = try item.source.read(at: item.byteOffset + written, count: want)
-            guard !data.isEmpty else { break }
-            try writer.write(contentsOf: data)
-            written += UInt64(data.count)
+        // Fragmented files (NTFS data runs) are stitched run by run; the
+        // total is capped at byteLength since the last run includes slack.
+        let segments = item.segments ?? [item.byteOffset..<(item.byteOffset + item.byteLength)]
+        var remaining = item.byteLength
+        for segment in segments {
+            var position = segment.lowerBound
+            while remaining > 0, position < segment.upperBound {
+                let want = Int(min(UInt64(chunkSize), min(remaining, segment.upperBound - position)))
+                let data = try item.source.read(at: position, count: want)
+                guard !data.isEmpty else { return }
+                try writer.write(contentsOf: data)
+                position += UInt64(data.count)
+                remaining -= UInt64(data.count)
+            }
+            if remaining == 0 { break }
         }
     }
 
