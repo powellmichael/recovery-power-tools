@@ -78,8 +78,11 @@ parsing on a synthetic image.
 
 ## Feature Backlog
 
-- Pause/resume a scan (currently only cancel; scanner is region+offset based,
-  so resuming from a saved cursor position is feasible).
+- **Phase 4: NTFS support.** Parse the boot sector + $Bitmap for free space
+  (restores the deleted-only guarantee on NTFS drives) and scan MFT records
+  for deleted entries: filenames, exact sizes, and data runs (handles
+  fragmented files, unlike the exFAT path). Currently NTFS drives fall back
+  to whole-device carving with no names and possible live-file results.
 
 ## Recommended Next Steps
 

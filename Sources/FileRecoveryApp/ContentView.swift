@@ -94,7 +94,17 @@ private struct Sidebar: View {
                 }
                 .disabled(!viewModel.canRecover)
 
-                if viewModel.state == .scanning {
+                if viewModel.isScanActive {
+                    Button {
+                        viewModel.togglePause()
+                    } label: {
+                        Label(
+                            viewModel.state == .paused ? "Resume" : "Pause",
+                            systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
+                        )
+                        .frame(maxWidth: .infinity)
+                    }
+
                     Button {
                         viewModel.cancelScan()
                     } label: {
@@ -145,6 +155,8 @@ private struct StatusBlock: View {
                 Label("Ready", systemImage: "circle")
             case .scanning:
                 Label("Scanning", systemImage: "waveform.path.ecg")
+            case .paused:
+                Label("Paused", systemImage: "pause.circle")
             case .recovering:
                 Label("Recovering", systemImage: "tray.and.arrow.down")
             case .finished:
@@ -154,7 +166,7 @@ private struct StatusBlock: View {
             }
 
             ProgressView(value: viewModel.progress.fraction)
-                .opacity(viewModel.state == .scanning ? 1 : 0.35)
+                .opacity(viewModel.isScanActive ? 1 : 0.35)
 
             Text("\(viewModel.items.count) item\(viewModel.items.count == 1 ? "" : "s") found")
                 .font(.caption)
@@ -169,7 +181,7 @@ private struct StatusBlock: View {
                     .font(.caption)
                     .foregroundStyle(.red)
                     .lineLimit(4)
-            } else if viewModel.state == .scanning {
+            } else if viewModel.isScanActive {
                 Text(viewModel.progress.currentPath)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -190,6 +202,28 @@ private struct ResultsView: View {
                     .font(.title2.bold())
                 Spacer()
                 if !viewModel.items.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("Filter by filename", text: Binding(
+                            get: { viewModel.filenameFilter },
+                            set: { viewModel.filenameFilter = $0 }
+                        ))
+                        .textFieldStyle(.plain)
+                        if !viewModel.filenameFilter.isEmpty {
+                            Button {
+                                viewModel.filenameFilter = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(6)
+                    .frame(maxWidth: 240)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+
                     Button {
                         viewModel.selectAllForRecovery()
                     } label: {
@@ -222,9 +256,12 @@ private struct ResultsView: View {
                 EmptyResultsView()
             } else {
                 HSplitView {
-                    Table(viewModel.items, selection: Binding(
+                    Table(viewModel.filteredItems, selection: Binding(
                         get: { viewModel.selectedItemID },
                         set: { viewModel.selectItem($0) }
+                    ), sortOrder: Binding(
+                        get: { viewModel.sortOrder },
+                        set: { viewModel.sortOrder = $0 }
                     )) {
                         TableColumn("") { item in
                             Toggle("", isOn: Binding(
@@ -240,7 +277,7 @@ private struct ResultsView: View {
                         }
                         .width(min: 110, ideal: 130)
 
-                        TableColumn("Filename") { item in
+                        TableColumn("Filename", value: \.filenameLabel) { item in
                             Text(item.filenameLabel)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -254,7 +291,7 @@ private struct ResultsView: View {
                         }
                         .width(min: 120, ideal: 150)
 
-                        TableColumn("Size") { item in
+                        TableColumn("Size", value: \.byteLength) { item in
                             Text(item.sizeLabel)
                         }
                         .width(min: 90, ideal: 110)
@@ -289,8 +326,11 @@ private struct ResultsView: View {
     }
 
     private var totalSize: String {
-        let total = viewModel.items.reduce(UInt64(0)) { $0 + $1.byteLength }
-        return ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+        let visible = viewModel.filteredItems
+        let total = visible.reduce(UInt64(0)) { $0 + $1.byteLength }
+        let size = ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+        guard visible.count != viewModel.items.count else { return size }
+        return "\(visible.count) of \(viewModel.items.count) — \(size)"
     }
 }
 

@@ -107,7 +107,22 @@ struct ScanProgress: Sendable {
 enum ScanState: Equatable {
     case idle
     case scanning
+    case paused
     case recovering
     case finished
     case failed(String)
+}
+
+/// Cross-thread pause switch checked by the scanner between read chunks.
+final class PauseGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paused = false
+
+    var isPaused: Bool {
+        lock.withLock { paused }
+    }
+
+    func setPaused(_ value: Bool) {
+        lock.withLock { paused = value }
+    }
 }
