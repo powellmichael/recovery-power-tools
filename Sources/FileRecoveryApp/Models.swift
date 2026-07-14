@@ -84,6 +84,8 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     let byteLength: UInt64
     let fileExtension: String
     let originalFilename: String?
+    /// Fragmented-file data runs (NTFS); nil = contiguous at byteOffset.
+    var segments: [Range<UInt64>]? = nil
     var recoveredURL: URL?
     var recoveryError: String?
 

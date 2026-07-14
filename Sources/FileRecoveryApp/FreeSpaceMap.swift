@@ -5,6 +5,9 @@ import Foundation
 struct DeletedFileEntry: Sendable, Equatable {
     let name: String
     let length: UInt64
+    /// Disk byte ranges holding the data when the file was fragmented
+    /// (NTFS data runs); nil means a single contiguous range at the key offset.
+    var segments: [Range<UInt64>]? = nil
 }
 
 /// Free (unallocated) byte regions of a volume. Anything carved from these
@@ -26,6 +29,9 @@ struct FreeSpaceMap: Sendable {
 
         if matchASCII(boot, at: 3, "EXFAT   ") {
             return try exfat(source, boot: boot)
+        }
+        if matchASCII(boot, at: 3, "NTFS    ") {
+            return try NTFS.map(source, boot: boot)
         }
         if matchASCII(boot, at: 82, "FAT32   ") {
             return try fat32(source, boot: boot)
