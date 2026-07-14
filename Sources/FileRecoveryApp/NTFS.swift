@@ -57,7 +57,7 @@ enum NTFS {
             volumeSize: volumeSize
         )) ?? [:]
 
-        return FreeSpaceMap(filesystem: "NTFS", regions: regions, deletedFiles: deleted)
+        return FreeSpaceMap(filesystem: "NTFS", regions: regions, deletedFiles: deleted, volumeSerial: FreeSpaceMap.le64(boot, 72))
     }
 
     // MARK: - Records

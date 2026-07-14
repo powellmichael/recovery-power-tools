@@ -16,6 +16,9 @@ struct FreeSpaceMap: Sendable {
     let filesystem: String
     let regions: [Range<UInt64>]
     var deletedFiles: [UInt64: DeletedFileEntry] = [:]
+    /// Volume serial number from the boot sector — a stable identity for
+    /// tracking recoveries across scans and re-mounts.
+    var volumeSerial: UInt64 = 0
 
     var freeBytes: UInt64 {
         regions.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
@@ -77,7 +80,7 @@ struct FreeSpaceMap: Sendable {
         }
 
         let regions = mergedRegions(freeClusters: freeClusters, dataStart: dataStart, clusterBytes: clusterBytes, deviceSize: source.size)
-        return FreeSpaceMap(filesystem: "FAT32", regions: regions)
+        return FreeSpaceMap(filesystem: "FAT32", regions: regions, volumeSerial: UInt64(le32(boot, 67)))
     }
 
     // MARK: - exFAT
@@ -137,7 +140,7 @@ struct FreeSpaceMap: Sendable {
             clusterCount: clusterCount,
             rootDirCluster: rootDirCluster
         )) ?? [:]
-        return FreeSpaceMap(filesystem: "exFAT", regions: regions, deletedFiles: deletedFiles)
+        return FreeSpaceMap(filesystem: "exFAT", regions: regions, deletedFiles: deletedFiles, volumeSerial: UInt64(le32(boot, 100)))
     }
 
     /// Walks the exFAT directory tree collecting deleted-file entry sets

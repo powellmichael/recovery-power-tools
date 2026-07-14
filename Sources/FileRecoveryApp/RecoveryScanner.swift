@@ -52,7 +52,8 @@ struct RecoveryScanner: Sendable {
         return ScanPlan(
             regions: map.regions.map { ScanRegion(source: source, range: $0) },
             note: "\(map.filesystem) volume — scanning \(sizeLabel) of free space. Everything found is deleted data.\(namesNote)",
-            deletedFiles: map.deletedFiles
+            deletedFiles: map.deletedFiles,
+            volumeID: map.volumeSerial
         )
     }
 

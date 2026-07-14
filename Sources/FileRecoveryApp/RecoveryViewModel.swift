@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import SwiftUI
 
 @MainActor
@@ -19,10 +20,26 @@ final class RecoveryViewModel: ObservableObject {
     @Published var scanNote: String?
     @Published var filenameFilter = ""
     @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = []
-    @Published var isPreviewPaneVisible = true
+    @Published var isPreviewPaneVisible = false
+    @Published var showFullSizePreview = false
+    @Published var saveAsZip = false
+    @Published var zipFileName = ""
+    @Published var recoveredVisibility: RecoveredVisibility = .all
+    @Published var showClearFilterPrompt = false
+    @Published var viewMode: ResultsViewMode = .list
+    @Published private(set) var thumbnails: [RecoveredItem.ID: NSImage] = [:]
+    private var thumbnailsRequested: Set<RecoveredItem.ID> = []
 
     var filteredItems: [RecoveredItem] {
         var visible = items
+        switch recoveredVisibility {
+        case .all:
+            break
+        case .unrecovered:
+            visible = visible.filter { !$0.previouslyRecovered && $0.recoveredURL == nil }
+        case .recovered:
+            visible = visible.filter { $0.previouslyRecovered || $0.recoveredURL != nil }
+        }
         if !filenameFilter.isEmpty {
             visible = visible.filter { $0.displayName.localizedCaseInsensitiveContains(filenameFilter) }
         }
@@ -37,6 +54,16 @@ final class RecoveryViewModel: ObservableObject {
     private var pendingItems: [RecoveredItem] = []
     private var flushScheduled = false
     private var pauseGate: PauseGate?
+    private var recoveryLog = RecoveryLog.load()
+    private var currentVolumeID: UInt64 = 0
+
+    /// Stable identity for a found file across scans: volume serial (when the
+    /// filesystem was recognized) plus location. ponytail: unrecognized
+    /// filesystems fall back to the source name, which is weaker.
+    private func logKey(for item: RecoveredItem) -> String {
+        let volume = currentVolumeID != 0 ? "v\(currentVolumeID)" : "n\(item.source.displayName)"
+        return "\(volume):\(item.byteOffset):\(item.byteLength)"
+    }
     private let scanner = RecoveryScanner()
 
     init() {
@@ -134,7 +161,13 @@ final class RecoveryViewModel: ObservableObject {
         previewError = nil
         progress = ScanProgress()
         scanNote = nil
+        clearThumbnails()
         state = .idle
+    }
+
+    private func clearThumbnails() {
+        thumbnails = [:]
+        thumbnailsRequested = []
     }
 
     func chooseDestination() {
@@ -159,6 +192,40 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    func allSelected(in category: MediaCategory) -> Bool {
+        category.kinds.allSatisfy(selectedKinds.contains)
+    }
+
+    func someSelected(in category: MediaCategory) -> Bool {
+        category.kinds.contains(where: selectedKinds.contains)
+    }
+
+    func setKinds(in category: MediaCategory, on: Bool) {
+        if on {
+            selectedKinds.formUnion(category.kinds)
+        } else {
+            selectedKinds.subtract(category.kinds)
+        }
+    }
+
+    /// Scan button entry point: if a filename filter is active it would hide
+    /// some new results, so ask whether to clear it first.
+    func scanButtonPressed() {
+        if !filenameFilter.isEmpty {
+            showClearFilterPrompt = true
+        } else {
+            startScan()
+        }
+    }
+
+    func confirmScan(clearFilter: Bool) {
+        showClearFilterPrompt = false
+        if clearFilter {
+            filenameFilter = ""
+        }
+        startScan()
+    }
+
     func startScan() {
         guard let target else { return }
         scanTask?.cancel()
@@ -170,6 +237,7 @@ final class RecoveryViewModel: ObservableObject {
         previewError = nil
         progress = ScanProgress()
         scanNote = nil
+        clearThumbnails()
         state = .scanning
 
         let scanner = scanner
@@ -182,7 +250,10 @@ final class RecoveryViewModel: ObservableObject {
                 // makePlan runs off the main actor; for devices it blocks on the
                 // macOS authorization prompt.
                 let plan = try await scanner.makePlan(for: target)
-                await MainActor.run { self?.scanNote = plan.note }
+                await MainActor.run {
+                    self?.scanNote = plan.note
+                    self?.currentVolumeID = plan.volumeID
+                }
 
                 let found = try await scanner.scan(
                     plan: plan,
@@ -202,7 +273,7 @@ final class RecoveryViewModel: ObservableObject {
                     guard let self else { return }
                     self.flushPendingItems()
                     let existingIDs = Set(self.items.map(\.id))
-                    let missing = found.filter { !existingIDs.contains($0.id) }
+                    let missing = found.filter { !existingIDs.contains($0.id) }.map { self.markedIfPreviouslyRecovered($0) }
                     self.items.append(contentsOf: missing)
                     self.state = .finished
                 }
@@ -251,9 +322,15 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Found items are NOT auto-selected for recovery: the user picks
     /// explicitly (or uses Select All on a filtered list).
+    private func markedIfPreviouslyRecovered(_ item: RecoveredItem) -> RecoveredItem {
+        var item = item
+        item.previouslyRecovered = recoveryLog.contains(logKey(for: item))
+        return item
+    }
+
     private func flushPendingItems() {
         guard !pendingItems.isEmpty else { return }
-        items.append(contentsOf: pendingItems)
+        items.append(contentsOf: pendingItems.map { markedIfPreviouslyRecovered($0) })
         pendingItems = []
         if selectedItemID == nil, let first = items.first {
             selectedItemID = first.id
@@ -267,6 +344,50 @@ final class RecoveryViewModel: ObservableObject {
         let currentIndex = visible.firstIndex { $0.id == selectedItemID } ?? (delta > 0 ? -1 : visible.count)
         let newIndex = min(max(currentIndex + delta, 0), visible.count - 1)
         selectItem(visible[newIndex].id)
+    }
+
+    /// Gallery cells ask for thumbnails as they scroll into view. Each item is
+    /// rendered once; huge files are skipped rather than decoded.
+    /// ponytail: unbounded cache, no eviction — add an LRU if a scan with tens
+    /// of thousands of images starts hurting memory.
+    func requestThumbnail(for item: RecoveredItem) {
+        guard item.kind.isPreviewable,
+              item.byteLength <= 64 * 1024 * 1024,
+              thumbnailsRequested.insert(item.id).inserted else { return }
+
+        let scanner = scanner
+        let itemID = item.id
+        Task.detached(priority: .utility) { [weak self] in
+            let url = Self.previewURL(for: item)
+            defer { try? FileManager.default.removeItem(at: url) }
+            try? scanner.write(item, to: url)
+            // NSImage isn't Sendable, so hand back PNG bytes and build the
+            // image on the main actor.
+            guard let data = Self.thumbnailData(at: url, maxPixel: 320) else { return }
+            await self?.setThumbnail(data, for: itemID)
+        }
+    }
+
+    private func setThumbnail(_ data: Data, for itemID: RecoveredItem.ID) {
+        guard let image = NSImage(data: data) else { return }
+        thumbnails[itemID] = image
+    }
+
+    private nonisolated static func thumbnailData(at url: URL, maxPixel: Int) -> Data? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              let output = CFDataCreateMutable(nil, 0),
+              let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
     }
 
     /// Preview-column click: select the row and make sure the pane is shown.
@@ -330,28 +451,92 @@ final class RecoveryViewModel: ObservableObject {
 
         let scanner = scanner
         let selected = items.filter { selectedRecoveryIDs.contains($0.id) }
+        let zipName: String? = saveAsZip ? Self.sanitizedZipName(zipFileName) : nil
+        let hadCustomZipName = saveAsZip && !zipFileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         Task.detached { [weak self] in
+            // Zip mode recovers into a temp folder first, then archives it.
+            let recoveryDir: URL
+            if zipName != nil {
+                recoveryDir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("FileRecoveryZip-\(UUID().uuidString)", isDirectory: true)
+            } else {
+                recoveryDir = destinationURL
+            }
+
             var outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)] = []
             for item in selected {
                 if Task.isCancelled { break }
                 do {
-                    outcomes.append((item.id, try scanner.recover(item, to: destinationURL), nil))
+                    outcomes.append((item.id, try scanner.recover(item, to: recoveryDir), nil))
                 } catch {
                     outcomes.append((item.id, nil, error.localizedDescription))
                 }
             }
-            await self?.applyRecoveryOutcomes(outcomes)
+
+            if let zipName {
+                defer { try? FileManager.default.removeItem(at: recoveryDir) }
+                do {
+                    let zipURL = try Self.zip(directory: recoveryDir, to: destinationURL, name: zipName)
+                    outcomes = outcomes.map { ($0.id, $0.url == nil ? nil : zipURL, $0.error) }
+                } catch {
+                    let message = error.localizedDescription
+                    outcomes = outcomes.map { ($0.id, nil, $0.error ?? message) }
+                }
+            }
+            await self?.applyRecoveryOutcomes(outcomes, clearZipNameOnSuccess: hadCustomZipName)
         }
     }
 
-    private func applyRecoveryOutcomes(_ outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)]) {
+    private nonisolated static func sanitizedZipName(_ raw: String) -> String {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        if name.isEmpty {
+            let stamp = ISO8601DateFormatter().string(from: Date())
+                .replacingOccurrences(of: ":", with: "")
+            name = "recovered-\(stamp)"
+        }
+        return name.lowercased().hasSuffix(".zip") ? name : "\(name).zip"
+    }
+
+    /// Archives the folder's contents with the system's ditto tool.
+    private nonisolated static func zip(directory: URL, to destination: URL, name: String) throws -> URL {
+        var zipURL = destination.appendingPathComponent(name)
+        var counter = 2
+        while FileManager.default.fileExists(atPath: zipURL.path) {
+            let base = (name as NSString).deletingPathExtension
+            zipURL = destination.appendingPathComponent("\(base)-\(counter).zip")
+            counter += 1
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-c", "-k", "--norsrc", directory.path, zipURL.path]
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw RecoveryError.cannotCreateOutput(zipURL.path)
+        }
+        return zipURL
+    }
+
+    private func applyRecoveryOutcomes(_ outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)], clearZipNameOnSuccess: Bool = false) {
+        var recordedAny = false
         for outcome in outcomes {
             guard let index = items.firstIndex(where: { $0.id == outcome.id }) else { continue }
             if let url = outcome.url {
                 items[index].recoveredURL = url
                 items[index].recoveryError = nil
+                recoveryLog.record(logKey(for: items[index]))
+                recordedAny = true
             } else {
                 items[index].recoveryError = outcome.error
+            }
+        }
+        if recordedAny {
+            recoveryLog.save()
+            if clearZipNameOnSuccess {
+                zipFileName = ""
             }
         }
         state = .finished

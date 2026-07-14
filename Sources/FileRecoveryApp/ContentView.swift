@@ -11,6 +11,57 @@ struct ContentView: View {
         } detail: {
             ResultsView(viewModel: viewModel)
         }
+        .sheet(isPresented: Binding(
+            get: { viewModel.showFullSizePreview && viewModel.previewImage != nil },
+            set: { viewModel.showFullSizePreview = $0 }
+        )) {
+            FullSizePreview(viewModel: viewModel)
+        }
+    }
+}
+
+/// Full-size image viewer: shows the image at its natural pixel size, with
+/// scrolling when it exceeds the window.
+private struct FullSizePreview: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                if let item = viewModel.selectedItem {
+                    let image = viewModel.previewImage
+                    let dimensions = image.map { "\(Int($0.size.width)) × \(Int($0.size.height))" } ?? ""
+                    Text(item.filenameLabel)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(dimensions)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    viewModel.showFullSizePreview = false
+                } label: {
+                    Label("Close", systemImage: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
+            }
+            .padding(12)
+
+            Divider()
+
+            ScrollView([.horizontal, .vertical]) {
+                if let image = viewModel.previewImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .frame(width: image.size.width, height: image.size.height)
+                }
+            }
+            .background(.black.opacity(0.6))
+        }
+        .frame(minWidth: 600, idealWidth: 1000, minHeight: 400, idealHeight: 720)
     }
 }
 
@@ -66,25 +117,46 @@ private struct Sidebar: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Media")
                     .font(.headline)
-                ForEach(MediaKind.allCases) { kind in
-                    Toggle(kind.rawValue, isOn: Binding(
-                        get: { viewModel.selectedKinds.contains(kind) },
-                        set: { _ in viewModel.toggleKind(kind) }
-                    ))
-                }
+                MediaFilterList(viewModel: viewModel)
             }
 
             Divider()
 
             VStack(alignment: .leading, spacing: 12) {
+                Toggle("Save as ZIP", isOn: Binding(
+                    get: { viewModel.saveAsZip },
+                    set: { viewModel.saveAsZip = $0 }
+                ))
+
+                if viewModel.saveAsZip {
+                    TextField("ZIP name (optional)", text: Binding(
+                        get: { viewModel.zipFileName },
+                        set: { viewModel.zipFileName = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                }
+
                 Button {
-                    viewModel.startScan()
+                    viewModel.scanButtonPressed()
                 } label: {
                     Label("Scan", systemImage: "magnifyingglass")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!viewModel.canScan)
+                .confirmationDialog(
+                    "A filename filter is active",
+                    isPresented: Binding(
+                        get: { viewModel.showClearFilterPrompt },
+                        set: { viewModel.showClearFilterPrompt = $0 }
+                    )
+                ) {
+                    Button("Clear filter and scan") { viewModel.confirmScan(clearFilter: true) }
+                    Button("Keep filter and scan") { viewModel.confirmScan(clearFilter: false) }
+                    Button("Cancel", role: .cancel) { viewModel.showClearFilterPrompt = false }
+                } message: {
+                    Text("“\(viewModel.filenameFilter)” will hide results that don't match. Clear it to see everything the scan finds.")
+                }
 
                 Button {
                     viewModel.recoverSelected()
@@ -202,6 +274,31 @@ private struct ResultsView: View {
                     .font(.title2.bold())
                 Spacer()
                 if !viewModel.items.isEmpty {
+                    Picker("", selection: Binding(
+                        get: { viewModel.viewMode },
+                        set: { viewModel.viewMode = $0 }
+                    )) {
+                        ForEach(ResultsViewMode.allCases) { mode in
+                            Image(systemName: mode.systemImage).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 90)
+                    .labelsHidden()
+                    .help("Switch between list and gallery")
+
+                    Picker("", selection: Binding(
+                        get: { viewModel.recoveredVisibility },
+                        set: { viewModel.recoveredVisibility = $0 }
+                    )) {
+                        ForEach(RecoveredVisibility.allCases) { visibility in
+                            Text(visibility.rawValue).tag(visibility)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 220)
+                    .labelsHidden()
+
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass")
                             .foregroundStyle(.secondary)
@@ -256,7 +353,28 @@ private struct ResultsView: View {
                 EmptyResultsView()
             } else {
                 HSplitView {
-                    Table(viewModel.filteredItems, selection: Binding(
+                    Group {
+                        if viewModel.viewMode == .gallery {
+                            GalleryView(viewModel: viewModel)
+                        } else {
+                            resultsTable
+                        }
+                    }
+                    .frame(minWidth: 600)
+
+                    if viewModel.isPreviewPaneVisible {
+                        PreviewPane(viewModel: viewModel)
+                            .frame(minWidth: 260, idealWidth: 320, maxWidth: 420)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 14)
+            }
+        }
+    }
+
+    private var resultsTable: some View {
+        Table(viewModel.filteredItems, selection: Binding(
                         get: { viewModel.selectedItemID },
                         set: { viewModel.selectItem($0) }
                     ), sortOrder: Binding(
@@ -316,6 +434,9 @@ private struct ResultsView: View {
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                                     .help(recoveryError)
+                            } else if item.previouslyRecovered {
+                                Text("Recovered previously")
+                                    .foregroundStyle(.orange)
                             } else {
                                 Text("Pending")
                                     .foregroundStyle(.secondary)
@@ -333,17 +454,6 @@ private struct ResultsView: View {
                             .help("Show or hide details")
                         }
                         .width(48)
-                    }
-                    .frame(minWidth: 600)
-
-                    if viewModel.isPreviewPaneVisible {
-                        PreviewPane(viewModel: viewModel)
-                            .frame(minWidth: 260, idealWidth: 320, maxWidth: 420)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 14)
-            }
         }
     }
 
@@ -356,11 +466,141 @@ private struct ResultsView: View {
     }
 }
 
+/// Media kinds grouped into collapsible categories. A category's own toggle
+/// selects or clears every kind in it; the box is filled when only some are on.
+private struct MediaFilterList: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+    @State private var expanded: Set<MediaCategory> = [.images]
+
+    var body: some View {
+        ForEach(MediaCategory.allCases) { category in
+            DisclosureGroup(isExpanded: Binding(
+                get: { expanded.contains(category) },
+                set: { isOpen in
+                    if isOpen { expanded.insert(category) } else { expanded.remove(category) }
+                }
+            )) {
+                ForEach(category.kinds) { kind in
+                    Toggle(kind.rawValue, isOn: Binding(
+                        get: { viewModel.selectedKinds.contains(kind) },
+                        set: { _ in viewModel.toggleKind(kind) }
+                    ))
+                }
+            } label: {
+                Toggle(isOn: Binding(
+                    get: { viewModel.allSelected(in: category) },
+                    set: { viewModel.setKinds(in: category, on: $0) }
+                )) {
+                    HStack(spacing: 6) {
+                        Text(category.rawValue)
+                        if viewModel.someSelected(in: category), !viewModel.allSelected(in: category) {
+                            Text("\(category.kinds.filter(viewModel.selectedKinds.contains).count)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private func icon(for kind: MediaKind) -> String {
     switch kind {
     case .jpeg, .png, .heic, .raw, .bmp: "photo"
     case .video, .avi, .wmv, .flv, .webm, .mpeg: "video"
     case .zip: "archivebox"
+    }
+}
+
+private struct GalleryView: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 14), count: 4)
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 14) {
+                ForEach(viewModel.filteredItems) { item in
+                    GalleryCell(viewModel: viewModel, item: item)
+                        .onAppear { viewModel.requestThumbnail(for: item) }
+                }
+            }
+            .padding(14)
+        }
+    }
+}
+
+private struct GalleryCell: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+    let item: RecoveredItem
+
+    private var isSelected: Bool { viewModel.selectedItemID == item.id }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                Button {
+                    viewModel.toggleDetails(for: item)
+                } label: {
+                    thumbnail
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 130)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Show or hide preview and details")
+
+                Toggle("", isOn: Binding(
+                    get: { viewModel.isSelectedForRecovery(item) },
+                    set: { viewModel.setSelectedForRecovery(item, isSelected: $0) }
+                ))
+                .labelsHidden()
+                .padding(6)
+            }
+
+            Text(item.filenameLabel)
+                .font(.caption)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .truncationMode(.middle)
+                .foregroundStyle(item.originalFilename == nil ? .secondary : .primary)
+
+            Text(item.sizeLabel)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if item.recoveredURL != nil {
+                Label("Recovered", systemImage: "checkmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            } else if item.previouslyRecovered {
+                Label("Recovered previously", systemImage: "clock.arrow.circlepath")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+            }
+        }
+        .padding(8)
+        .background(isSelected ? AnyShapeStyle(.selection) : AnyShapeStyle(.clear), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+        }
+    }
+
+    @ViewBuilder
+    private var thumbnail: some View {
+        if let image = viewModel.thumbnails[item.id] {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .padding(4)
+        } else {
+            Image(systemName: icon(for: item.kind))
+                .font(.system(size: 32))
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -376,6 +616,13 @@ private struct PreviewPane: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 220)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+
+            if viewModel.previewImage != nil {
+                Text("Click the image to view it full size")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
 
             if let item = viewModel.selectedItem {
                 VStack(alignment: .leading, spacing: 8) {
@@ -401,10 +648,16 @@ private struct PreviewPane: View {
     @ViewBuilder
     private var previewContent: some View {
         if let image = viewModel.previewImage {
-            Image(nsImage: image)
-                .resizable()
-                .scaledToFit()
-                .padding(10)
+            Button {
+                viewModel.showFullSizePreview = true
+            } label: {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(10)
+            }
+            .buttonStyle(.plain)
+            .help("View full size")
         } else if let item = viewModel.selectedItem, !item.kind.isPreviewable {
             VStack(spacing: 10) {
                 Image(systemName: icon(for: item.kind))

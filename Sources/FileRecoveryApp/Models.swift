@@ -60,6 +60,22 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum MediaCategory: String, CaseIterable, Identifiable, Sendable {
+    case images = "Images"
+    case video = "Video"
+    case archives = "Archives"
+
+    var id: String { rawValue }
+
+    var kinds: [MediaKind] {
+        switch self {
+        case .images: [.jpeg, .png, .heic, .raw, .bmp]
+        case .video: [.video, .avi, .wmv, .flv, .webm, .mpeg]
+        case .archives: [.zip]
+        }
+    }
+}
+
 enum ScanTarget: Equatable, Sendable {
     case path(URL)
     case device(ExternalDevice)
@@ -74,6 +90,64 @@ struct ScanPlan: Sendable {
     let regions: [ScanRegion]
     let note: String?
     var deletedFiles: [UInt64: DeletedFileEntry] = [:]
+    /// Volume serial when the filesystem was recognized; 0 otherwise.
+    var volumeID: UInt64 = 0
+}
+
+enum ResultsViewMode: String, CaseIterable, Identifiable {
+    case list = "List"
+    case gallery = "Gallery"
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .list: "list.bullet"
+        case .gallery: "square.grid.2x2"
+        }
+    }
+}
+
+enum RecoveredVisibility: String, CaseIterable, Identifiable {
+    case all = "All"
+    case unrecovered = "New"
+    case recovered = "Recovered"
+    var id: String { rawValue }
+}
+
+/// Persistent record of recovered files, keyed by volume serial + location,
+/// so repeat scans can show what was already recovered.
+struct RecoveryLog {
+    private var keys: Set<String>
+
+    private static var fileURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FileRecovery", isDirectory: true)
+            .appendingPathComponent("recovered.json")
+    }
+
+    static func load() -> RecoveryLog {
+        guard let data = try? Data(contentsOf: fileURL),
+              let keys = try? JSONDecoder().decode(Set<String>.self, from: data) else {
+            return RecoveryLog(keys: [])
+        }
+        return RecoveryLog(keys: keys)
+    }
+
+    func contains(_ key: String) -> Bool {
+        keys.contains(key)
+    }
+
+    mutating func record(_ key: String) {
+        keys.insert(key)
+    }
+
+    func save() {
+        try? FileManager.default.createDirectory(
+            at: Self.fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? JSONEncoder().encode(keys).write(to: Self.fileURL)
+    }
 }
 
 struct RecoveredItem: Identifiable, Hashable, Sendable {
@@ -88,6 +162,8 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     var segments: [Range<UInt64>]? = nil
     var recoveredURL: URL?
     var recoveryError: String?
+    /// True when the recovery log says this file was recovered in a past run.
+    var previouslyRecovered = false
 
     var displayName: String {
         originalFilename
