@@ -17,11 +17,26 @@ final class RecoveryViewModel: ObservableObject {
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
     @Published var scanNote: String?
+    @Published var filenameFilter = ""
+    @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = []
+    @Published var isPreviewPaneVisible = true
+
+    var filteredItems: [RecoveredItem] {
+        var visible = items
+        if !filenameFilter.isEmpty {
+            visible = visible.filter { $0.displayName.localizedCaseInsensitiveContains(filenameFilter) }
+        }
+        if !sortOrder.isEmpty {
+            visible.sort(using: sortOrder)
+        }
+        return visible
+    }
 
     private var scanTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
     private var pendingItems: [RecoveredItem] = []
     private var flushScheduled = false
+    private var pauseGate: PauseGate?
     private let scanner = RecoveryScanner()
 
     init() {
@@ -31,7 +46,8 @@ final class RecoveryViewModel: ObservableObject {
         // there is exactly one view model per app.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, !self.items.isEmpty,
-                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else {
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  !(NSApp.keyWindow?.firstResponder is NSTextView) else {
                 return event
             }
             switch event.keyCode {
@@ -47,12 +63,16 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    var isScanActive: Bool {
+        state == .scanning || state == .paused
+    }
+
     var canScan: Bool {
-        target != nil && state != .scanning && state != .recovering && !selectedKinds.isEmpty
+        target != nil && !isScanActive && state != .recovering && !selectedKinds.isEmpty
     }
 
     var canRecover: Bool {
-        destinationURL != nil && !selectedRecoveryIDs.isEmpty && state != .scanning && state != .recovering
+        destinationURL != nil && !selectedRecoveryIDs.isEmpty && !isScanActive && state != .recovering
     }
 
     /// Warns when the user picked a folder on an external drive: folder scans
@@ -154,6 +174,8 @@ final class RecoveryViewModel: ObservableObject {
 
         let scanner = scanner
         let kinds = selectedKinds
+        let gate = PauseGate()
+        pauseGate = gate
 
         scanTask = Task { [weak self] in
             do {
@@ -165,6 +187,7 @@ final class RecoveryViewModel: ObservableObject {
                 let found = try await scanner.scan(
                     plan: plan,
                     selectedKinds: kinds,
+                    pauseGate: gate,
                     progress: { newProgress in
                         await MainActor.run { self?.progress = newProgress }
                     },
@@ -181,7 +204,6 @@ final class RecoveryViewModel: ObservableObject {
                     let existingIDs = Set(self.items.map(\.id))
                     let missing = found.filter { !existingIDs.contains($0.id) }
                     self.items.append(contentsOf: missing)
-                    self.selectedRecoveryIDs.formUnion(missing.map(\.id))
                     self.state = .finished
                 }
             } catch is CancellationError {
@@ -195,8 +217,22 @@ final class RecoveryViewModel: ObservableObject {
     func cancelScan() {
         scanTask?.cancel()
         scanTask = nil
+        pauseGate = nil
         flushPendingItems()
         state = .idle
+    }
+
+    func togglePause() {
+        switch state {
+        case .scanning:
+            pauseGate?.setPaused(true)
+            state = .paused
+        case .paused:
+            pauseGate?.setPaused(false)
+            state = .scanning
+        default:
+            break
+        }
     }
 
     /// Found items are buffered and flushed a few times a second — appending
@@ -213,10 +249,11 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    /// Found items are NOT auto-selected for recovery: the user picks
+    /// explicitly (or uses Select All on a filtered list).
     private func flushPendingItems() {
         guard !pendingItems.isEmpty else { return }
         items.append(contentsOf: pendingItems)
-        selectedRecoveryIDs.formUnion(pendingItems.map(\.id))
         pendingItems = []
         if selectedItemID == nil, let first = items.first {
             selectedItemID = first.id
@@ -225,10 +262,28 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func moveSelection(_ delta: Int) {
-        guard !items.isEmpty else { return }
-        let currentIndex = items.firstIndex { $0.id == selectedItemID } ?? (delta > 0 ? -1 : items.count)
-        let newIndex = min(max(currentIndex + delta, 0), items.count - 1)
-        selectItem(items[newIndex].id)
+        let visible = filteredItems
+        guard !visible.isEmpty else { return }
+        let currentIndex = visible.firstIndex { $0.id == selectedItemID } ?? (delta > 0 ? -1 : visible.count)
+        let newIndex = min(max(currentIndex + delta, 0), visible.count - 1)
+        selectItem(visible[newIndex].id)
+    }
+
+    /// Preview-column click: select the row and make sure the pane is shown.
+    func showDetails(for item: RecoveredItem) {
+        selectItem(item.id)
+        isPreviewPaneVisible = true
+    }
+
+    /// Details-column click: toggles the pane when re-clicking the selected
+    /// row, otherwise selects the row and shows the pane.
+    func toggleDetails(for item: RecoveredItem) {
+        if isPreviewPaneVisible && selectedItemID == item.id {
+            isPreviewPaneVisible = false
+        } else {
+            selectItem(item.id)
+            isPreviewPaneVisible = true
+        }
     }
 
     func selectItem(_ itemID: RecoveredItem.ID?) {
@@ -254,8 +309,10 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    /// Selects the visible (filtered) items, so a filename filter can scope
+    /// exactly what gets recovered.
     func selectAllForRecovery() {
-        selectedRecoveryIDs = Set(items.map(\.id))
+        selectedRecoveryIDs.formUnion(filteredItems.map(\.id))
     }
 
     func selectNoneForRecovery() {
@@ -306,9 +363,7 @@ final class RecoveryViewModel: ObservableObject {
         previewFileURL = nil
         previewError = nil
 
-        guard item.kind == .jpeg || item.kind == .png || item.kind == .heic || item.kind == .bmp else {
-            return
-        }
+        guard item.kind.isPreviewable else { return }
 
         let scanner = scanner
         previewTask = Task {

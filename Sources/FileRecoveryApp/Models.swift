@@ -33,6 +33,14 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Kinds the app can render an image preview for.
+    var isPreviewable: Bool {
+        switch self {
+        case .jpeg, .png, .heic, .bmp: true
+        default: false
+        }
+    }
+
     /// Extensions that mean "this whole source file already is this kind".
     var knownExtensions: Set<String> {
         switch self {
@@ -107,7 +115,22 @@ struct ScanProgress: Sendable {
 enum ScanState: Equatable {
     case idle
     case scanning
+    case paused
     case recovering
     case finished
     case failed(String)
+}
+
+/// Cross-thread pause switch checked by the scanner between read chunks.
+final class PauseGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paused = false
+
+    var isPaused: Bool {
+        lock.withLock { paused }
+    }
+
+    func setPaused(_ value: Bool) {
+        lock.withLock { paused = value }
+    }
 }

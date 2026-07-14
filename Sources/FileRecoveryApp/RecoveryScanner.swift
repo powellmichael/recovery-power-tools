@@ -61,6 +61,7 @@ struct RecoveryScanner: Sendable {
     func scan(
         plan: ScanPlan,
         selectedKinds: Set<MediaKind>,
+        pauseGate: PauseGate? = nil,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
         itemFound: @escaping @Sendable (RecoveredItem) async -> Void
     ) async throws -> [RecoveredItem] {
@@ -75,7 +76,7 @@ struct RecoveryScanner: Sendable {
         if let source = plan.regions.first?.source, !plan.deletedFiles.isEmpty {
             let freeRanges = plan.regions.map(\.range).sorted { $0.lowerBound < $1.lowerBound }
             for (offset, entry) in plan.deletedFiles.sorted(by: { $0.key < $1.key }) {
-                try Task.checkCancellation()
+                try await waitIfPaused(pauseGate)
                 guard entry.length > 0, offset < source.size else { continue }
                 // Data reused by a live file is no longer in free space — skip.
                 guard rangesContain(freeRanges, offset) else { continue }
@@ -108,6 +109,7 @@ struct RecoveryScanner: Sendable {
                 selectedKinds: selectedKinds,
                 deletedFiles: plan.deletedFiles,
                 claimed: regionClaims,
+                pauseGate: pauseGate,
                 progress: progress,
                 itemFound: itemFound
             )
@@ -126,6 +128,7 @@ struct RecoveryScanner: Sendable {
         selectedKinds: Set<MediaKind>,
         deletedFiles: [UInt64: DeletedFileEntry],
         claimed: [RecoveredItem],
+        pauseGate: PauseGate?,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
         itemFound: @escaping @Sendable (RecoveredItem) async -> Void
     ) async throws -> [RecoveredItem] {
@@ -137,7 +140,7 @@ struct RecoveryScanner: Sendable {
         var lastReport = Date.distantPast
 
         while cursor < regionEnd {
-            try Task.checkCancellation()
+            try await waitIfPaused(pauseGate)
             let want = Int(min(UInt64(chunkSize), regionEnd - cursor))
             let chunk = try source.read(at: cursor, count: want)
             let isLast = chunk.isEmpty || cursor + UInt64(chunk.count) >= regionEnd
@@ -178,6 +181,16 @@ struct RecoveryScanner: Sendable {
         }
 
         return items.sorted { $0.byteOffset < $1.byteOffset }
+    }
+
+    /// Blocks while the gate is paused; pause latency is at most one chunk
+    /// plus one candidate length parse.
+    private func waitIfPaused(_ gate: PauseGate?) async throws {
+        try Task.checkCancellation()
+        while let gate, gate.isPaused {
+            try await Task.sleep(for: .milliseconds(200))
+            try Task.checkCancellation()
+        }
     }
 
     // MARK: - Candidate detection
