@@ -114,6 +114,42 @@ private func be32(_ value: UInt32) -> [UInt8] {
         let recoveredBytes = [UInt8](try Data(contentsOf: recovered))
         #expect(recoveredBytes == jpeg)
     }
+
+    /// An EXIF thumbnail is a whole JPEG nested inside APP1, so its FFD9 comes
+    /// before the outer image's. Scanning for the first FFD9 truncates the file
+    /// to the header; segment walking must skip APP1 wholesale.
+    @Test func exifThumbnailDoesNotTruncateJPEG() async throws {
+        var thumbnail: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0]
+        thumbnail += [0x00, 0x10] + [UInt8](repeating: 0x11, count: 14)
+        thumbnail += [0xFF, 0xD9] // the decoy end marker
+
+        // APP1: FFE1, 2-byte length covering itself, then the nested thumbnail.
+        let app1Length = thumbnail.count + 2
+        var jpeg: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE1]
+        jpeg += [UInt8(app1Length >> 8 & 0xFF), UInt8(app1Length & 0xFF)]
+        jpeg += thumbnail
+
+        // SOS, then entropy data exercising FF00 stuffing and a restart marker.
+        jpeg += [0xFF, 0xDA, 0x00, 0x08] + [UInt8](repeating: 0x01, count: 6)
+        jpeg += [0x37, 0xFF, 0x00, 0x42, 0xFF, 0xD0, 0x9C]
+        jpeg += [0xFF, 0xD9] // the real end marker
+
+        var blob = [UInt8](repeating: 0xAA, count: 128)
+        let start = blob.count
+        blob += jpeg
+        blob += [UInt8](repeating: 0xAA, count: 128)
+
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let scanner = RecoveryScanner()
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+
+        let item = try #require(items.first { $0.byteOffset == UInt64(start) })
+        #expect(item.byteLength == UInt64(jpeg.count))
+    }
 }
 
 @Suite struct FreeSpaceTests {

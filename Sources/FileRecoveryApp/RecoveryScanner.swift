@@ -260,6 +260,11 @@ struct RecoveryScanner: Sendable {
         case 0xFF: // JPEG
             guard kinds.contains(.jpeg), match(bytes, index, [0xFF, 0xD8, 0xFF]) else { return nil }
             let limit = min(regionEnd, absolute &+ jpegSearchCap)
+            // Prefer the structural length; fall back to a raw FFD9 scan when the
+            // segments don't hold, so a damaged JPEG still comes back as before.
+            if let length = try jpegLength(in: source, from: absolute, regionEnd: regionEnd) {
+                return Candidate(kind: .jpeg, start: index, length: length, ext: nil)
+            }
             guard let end = try findMarkerEnd(in: source, from: absolute + 3, limit: limit, marker: [0xFF, 0xD9]) else { return nil }
             return Candidate(kind: .jpeg, start: index, length: end - absolute, ext: nil)
 
@@ -445,6 +450,102 @@ struct RecoveryScanner: Sendable {
 
             offset += UInt64(data.count)
             carry = Array(buffer.suffix(marker.count - 1))
+        }
+        return nil
+    }
+
+    /// Buffered forward byte reader. Segment walking reads a few bytes at a
+    /// time and one pread per byte would be pathological.
+    /// ponytail: forward-only — a backward seek refills the window.
+    private struct ByteWindow {
+        let source: ScanSource
+        let limit: UInt64
+        private var buffer: [UInt8] = []
+        private var bufferStart: UInt64 = 0
+
+        init(source: ScanSource, limit: UInt64) {
+            self.source = source
+            self.limit = limit
+        }
+
+        mutating func byte(at offset: UInt64) throws -> UInt8? {
+            guard offset < limit else { return nil }
+            if offset < bufferStart || offset >= bufferStart &+ UInt64(buffer.count) {
+                let want = Int(min(UInt64(64 * 1024), limit - offset))
+                guard want > 0 else { return nil }
+                buffer = [UInt8](try source.read(at: offset, count: want))
+                bufferStart = offset
+                guard !buffer.isEmpty else { return nil }
+            }
+            return buffer[Int(offset - bufferStart)]
+        }
+
+        /// Big-endian segment length, which includes its own two bytes.
+        mutating func segmentLength(at offset: UInt64) throws -> UInt64? {
+            guard let hi = try byte(at: offset), let lo = try byte(at: offset + 1) else { return nil }
+            let length = UInt64(hi) << 8 | UInt64(lo)
+            return length >= 2 ? length : nil
+        }
+    }
+
+    /// JPEG length by walking the segment structure rather than scanning for
+    /// FFD9. An EXIF thumbnail is a whole JPEG nested in the APP1 segment, so a
+    /// byte scan stops at the thumbnail's end marker and truncates the file.
+    /// Walking skips each segment by its declared length, so only the outer
+    /// image's EOI can match.
+    private func jpegLength(in source: ScanSource, from start: UInt64, regionEnd: UInt64) throws -> UInt64? {
+        let limit = min(regionEnd, start &+ jpegSearchCap)
+        var window = ByteWindow(source: source, limit: limit)
+        var offset = start + 2 // past SOI
+
+        while offset < limit {
+            try Task.checkCancellation()
+            guard let prefix = try window.byte(at: offset), prefix == 0xFF else { return nil }
+
+            // Fill bytes (extra FFs) may pad the gap before a marker id.
+            var idOffset = offset + 1
+            var id: UInt8
+            while true {
+                guard let candidate = try window.byte(at: idOffset) else { return nil }
+                if candidate != 0xFF { id = candidate; break }
+                idOffset += 1
+            }
+            offset = idOffset + 1
+
+            switch id {
+            case 0xD9: // EOI — the real end of the outer image
+                return offset - start
+            case 0x01, 0xD0...0xD7: // standalone markers, no payload
+                continue
+            case 0xDA: // SOS: header, then entropy-coded data up to the next marker
+                guard let length = try window.segmentLength(at: offset) else { return nil }
+                offset += length
+                guard let next = try scanEntropy(&window, from: offset) else { return nil }
+                offset = next
+            default:
+                guard let length = try window.segmentLength(at: offset) else { return nil }
+                offset += length
+            }
+        }
+        return nil
+    }
+
+    /// Walk entropy-coded scan data to the next real marker. Inside it, FF00 is
+    /// a stuffed literal FF and FFD0-FFD7 are restart markers; neither ends the
+    /// scan. Returns the offset of the next marker's FF prefix.
+    private func scanEntropy(_ window: inout ByteWindow, from start: UInt64) throws -> UInt64? {
+        var offset = start
+        while offset < window.limit {
+            try Task.checkCancellation()
+            guard let byte = try window.byte(at: offset) else { return nil }
+            guard byte == 0xFF else { offset += 1; continue }
+            guard let next = try window.byte(at: offset + 1) else { return nil }
+            if next == 0x00 || (0xD0...0xD7).contains(next) {
+                offset += 2
+                continue
+            }
+            if next == 0xFF { offset += 1; continue } // fill byte
+            return offset
         }
         return nil
     }
