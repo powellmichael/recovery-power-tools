@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import SwiftUI
 
 struct ContentView: View {
@@ -404,11 +405,11 @@ private struct ResultsView: View {
                         .width(min: 150, ideal: 200)
 
                         TableColumn("Preview") { item in
-                            if item.kind.isPreviewable {
+                            if item.kind.isPreviewable || item.kind.isVideoPreviewable {
                                 Button {
                                     viewModel.showDetails(for: item)
                                 } label: {
-                                    Image(systemName: "photo")
+                                    Image(systemName: item.kind.isVideoPreviewable ? "play.rectangle" : "photo")
                                         .foregroundStyle(.tint)
                                 }
                                 .buttonStyle(.plain)
@@ -596,11 +597,39 @@ private struct GalleryCell: View {
                 .resizable()
                 .scaledToFit()
                 .padding(4)
+                .overlay(alignment: .bottomTrailing) {
+                    if item.kind.isVideoPreviewable {
+                        Image(systemName: "play.circle.fill")
+                            .font(.title2)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .black.opacity(0.55))
+                            .padding(8)
+                    }
+                }
         } else {
             Image(systemName: icon(for: item.kind))
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// SwiftUI's VideoPlayer crashes in a bare SwiftPM executable — its Swift
+/// metadata can't resolve AVPlayerView's ObjC superclass at runtime. Hosting
+/// AVPlayerView ourselves gives the same transport controls without it.
+private struct PlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.videoGravity = .resizeAspect
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        if view.player !== player { view.player = player }
     }
 }
 
@@ -658,7 +687,11 @@ private struct PreviewPane: View {
             }
             .buttonStyle(.plain)
             .help("View full size")
-        } else if let item = viewModel.selectedItem, !item.kind.isPreviewable {
+        } else if let player = viewModel.previewPlayer {
+            PlayerView(player: player)
+                .padding(4)
+        } else if let item = viewModel.selectedItem,
+                  !item.kind.isPreviewable, !item.kind.isVideoPreviewable {
             VStack(spacing: 10) {
                 Image(systemName: icon(for: item.kind))
                     .font(.system(size: 42))

@@ -41,6 +41,15 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Kinds we hand to AVPlayer. It rejects what it can't decode (FLV, most
+    /// WMV), so playability is confirmed per file rather than assumed here.
+    var isVideoPreviewable: Bool {
+        switch self {
+        case .video, .avi, .wmv, .flv, .webm, .mpeg: true
+        default: false
+        }
+    }
+
     /// Extensions that mean "this whole source file already is this kind".
     var knownExtensions: Set<String> {
         switch self {

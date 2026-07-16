@@ -1,3 +1,4 @@
+import AVKit
 import AppKit
 import Foundation
 import ImageIO
@@ -14,6 +15,7 @@ final class RecoveryViewModel: ObservableObject {
     @Published var selectedItemID: RecoveredItem.ID?
     @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = []
     @Published var previewImage: NSImage?
+    @Published var previewPlayer: AVPlayer?
     @Published var previewFileURL: URL?
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
@@ -156,9 +158,7 @@ final class RecoveryViewModel: ObservableObject {
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
-        previewImage = nil
-        previewFileURL = nil
-        previewError = nil
+        clearPreview()
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
@@ -232,9 +232,7 @@ final class RecoveryViewModel: ObservableObject {
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
-        previewImage = nil
-        previewFileURL = nil
-        previewError = nil
+        clearPreview()
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
@@ -351,8 +349,12 @@ final class RecoveryViewModel: ObservableObject {
     /// ponytail: unbounded cache, no eviction — add an LRU if a scan with tens
     /// of thousands of images starts hurting memory.
     func requestThumbnail(for item: RecoveredItem) {
-        guard item.kind.isPreviewable,
-              item.byteLength <= 64 * 1024 * 1024,
+        let isVideo = item.kind.isVideoPreviewable
+        // Videos have to be written out whole before a frame can be grabbed, so
+        // they get a higher cap than images but still not an unlimited one.
+        let sizeCap: UInt64 = isVideo ? 256 * 1024 * 1024 : 64 * 1024 * 1024
+        guard item.kind.isPreviewable || isVideo,
+              item.byteLength <= sizeCap,
               thumbnailsRequested.insert(item.id).inserted else { return }
 
         let scanner = scanner
@@ -363,9 +365,23 @@ final class RecoveryViewModel: ObservableObject {
             try? scanner.write(item, to: url)
             // NSImage isn't Sendable, so hand back PNG bytes and build the
             // image on the main actor.
-            guard let data = Self.thumbnailData(at: url, maxPixel: 320) else { return }
+            let data = isVideo
+                ? await Self.videoThumbnailData(at: url, maxPixel: 320)
+                : Self.thumbnailData(at: url, maxPixel: 320)
+            guard let data else { return }
             await self?.setThumbnail(data, for: itemID)
         }
+    }
+
+    /// First decodable frame of a carved video. Tolerance is wide open so the
+    /// generator can settle on the nearest keyframe instead of failing.
+    private nonisolated static func videoThumbnailData(at url: URL, maxPixel: Int) async -> Data? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+        generator.requestedTimeToleranceAfter = .positiveInfinity
+        guard let cgImage = try? await generator.image(at: .zero).image else { return nil }
+        return pngData(cgImage)
     }
 
     private func setThumbnail(_ data: Data, for itemID: RecoveredItem.ID) {
@@ -380,8 +396,14 @@ final class RecoveryViewModel: ObservableObject {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
         ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-              let output = CFDataCreateMutable(nil, 0),
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return pngData(cgImage)
+    }
+
+    private nonisolated static func pngData(_ cgImage: CGImage) -> Data? {
+        guard let output = CFDataCreateMutable(nil, 0),
               let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else {
             return nil
         }
@@ -410,9 +432,7 @@ final class RecoveryViewModel: ObservableObject {
     func selectItem(_ itemID: RecoveredItem.ID?) {
         selectedItemID = itemID
         guard let item = selectedItem else {
-            previewImage = nil
-            previewFileURL = nil
-            previewError = nil
+            clearPreview()
             return
         }
         preparePreview(for: item)
@@ -542,13 +562,20 @@ final class RecoveryViewModel: ObservableObject {
         state = .finished
     }
 
-    private func preparePreview(for item: RecoveredItem) {
-        previewTask?.cancel()
+    func clearPreview() {
+        previewPlayer?.pause()
+        previewPlayer = nil
         previewImage = nil
         previewFileURL = nil
         previewError = nil
+    }
 
-        guard item.kind.isPreviewable else { return }
+    private func preparePreview(for item: RecoveredItem) {
+        previewTask?.cancel()
+        clearPreview()
+
+        let isVideo = item.kind.isVideoPreviewable
+        guard item.kind.isPreviewable || isVideo else { return }
 
         let scanner = scanner
         previewTask = Task {
@@ -556,6 +583,19 @@ final class RecoveryViewModel: ObservableObject {
                 let outputURL = Self.previewURL(for: item)
                 try scanner.write(item, to: outputURL)
                 try Task.checkCancellation()
+
+                if isVideo {
+                    // A carved video can be truncated or in a container AVFoundation
+                    // won't decode, so ask the asset before handing it to a player.
+                    let playable = (try? await AVURLAsset(url: outputURL).load(.isPlayable)) ?? false
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        previewFileURL = outputURL
+                        previewPlayer = playable ? AVPlayer(url: outputURL) : nil
+                        previewError = playable ? nil : "\(item.kind.rawValue) playback not supported"
+                    }
+                    return
+                }
 
                 let image = NSImage(contentsOf: outputURL)
 
