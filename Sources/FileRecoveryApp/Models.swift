@@ -271,6 +271,22 @@ struct ScanProgress: Sendable {
         guard totalBytes > 0 else { return 0 }
         return min(1, Double(bytesScanned) / Double(totalBytes))
     }
+
+    /// Bytes read over bytes to read. Rough by nature: free space is scanned in
+    /// regions of uneven size and a dense region yields more candidates per
+    /// byte, so the rate is not constant.
+    var percentLabel: String? {
+        guard totalBytes > 0 else { return nil }
+        return "\(Int((fraction * 100).rounded()))%"
+    }
+
+    /// Scanned and total as sizes, e.g. "412.7 GB of 991 GB".
+    var byteLabel: String? {
+        guard totalBytes > 0 else { return nil }
+        let done = ByteCountFormatter.string(fromByteCount: Int64(bytesScanned), countStyle: .file)
+        let total = ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
+        return "\(done) of \(total)"
+    }
 }
 
 enum ScanState: Equatable {

@@ -281,6 +281,21 @@ private struct StatusBlock: View {
             ProgressView(value: viewModel.progress.fraction)
                 .opacity(viewModel.isScanActive ? 1 : 0.35)
 
+            if let percent = viewModel.progress.percentLabel, viewModel.progress.totalBytes > 0 {
+                HStack(spacing: 6) {
+                    Text(percent)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                    if let bytes = viewModel.progress.byteLabel {
+                        Text(bytes)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .help("Share of the scanned area read so far. Files are found unevenly, so this is an estimate.")
+            }
+
             Text("\(viewModel.items.count) item\(viewModel.items.count == 1 ? "" : "s") found")
                 .font(.caption)
                 .foregroundStyle(.secondary)

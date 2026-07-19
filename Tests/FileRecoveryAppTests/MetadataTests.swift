@@ -105,3 +105,28 @@ private func makeJPEG(properties: [CFString: Any]) throws -> URL {
         #expect(RecoveryViewModel.imageMetadata(at: url).isEmpty)
     }
 }
+
+@Suite struct ScanProgressTests {
+    @Test func reportsPercentAndBytes() throws {
+        let progress = ScanProgress(bytesScanned: 500, totalBytes: 1000, currentPath: "")
+        #expect(progress.percentLabel == "50%")
+        // Exact wording is ByteCountFormatter's and locale-dependent; assert
+        // the shape rather than pinning its output.
+        let bytes = try #require(progress.byteLabel)
+        #expect(bytes.contains(" of "))
+    }
+
+    /// Before a plan exists totalBytes is 0; showing "0%" would imply a stalled
+    /// scan rather than one that hasn't started measuring.
+    @Test func hidesPercentBeforeTotalIsKnown() {
+        let progress = ScanProgress(bytesScanned: 0, totalBytes: 0, currentPath: "")
+        #expect(progress.percentLabel == nil)
+        #expect(progress.byteLabel == nil)
+    }
+
+    /// Region sizes are summed, so rounding can push scanned past total.
+    @Test func clampsOverrunToFullyComplete() {
+        let progress = ScanProgress(bytesScanned: 1200, totalBytes: 1000, currentPath: "")
+        #expect(progress.percentLabel == "100%")
+    }
+}
