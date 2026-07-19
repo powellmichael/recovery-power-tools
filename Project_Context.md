@@ -90,7 +90,10 @@ of JPEGs with damaged headers and a strict parser would recover fewer files.
 - Nothing is selected for recovery by default (bulk-export accidents).
 - Three-way visibility: All / New / Recovered.
 - Media types grouped into collapsible Images / Video / Archives categories;
-  JPEG only by default.
+  JPEG only by default. The sidebar controls scroll, so expanding a category
+  grows downward instead of pushing the top of the sidebar out of view; the
+  status block stays pinned to the bottom so scan progress is visible while
+  scrolled.
 - Multi-selection in both views: shift-click for a range, command-click for
   discontiguous picks. Ticking one checkbox inside a multi-row selection
   applies to the whole selection; a checkbox outside it affects only its own
@@ -168,11 +171,7 @@ so tests never touch the real file.
 
 ## Open UI Issues
 
-- **Sidebar shifts when a Media category expands.** Opening Images pushes the
-  content above it upward instead of growing downward or scrolling. Reported
-  2026-07-19, not yet fixed. The sidebar `VStack` needs a `ScrollView` with a
-  top-anchored layout so expanding a `DisclosureGroup` doesn't reflow
-  everything above it.
+None currently open.
 
 ## Known Limitations / Deliberate Deferrals
 
@@ -241,21 +240,19 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
 
 ## Recommended Next Steps
 
-1. **Fix the sidebar layout shift** when a Media category expands (see Open UI
-   Issues) — small, and it's in the way every time the app is used.
-2. **Field-test phase 5** on the NTFS drive: video playback, gallery video
+1. **Field-test phase 5** on the NTFS drive: video playback, gallery video
    thumbnails, EXIF/GPS on real photos, manifest export → replug → import to
    see how many entries survive a mount. That last number decides whether scan
    resume is worth building.
-3. **Landing page** once the design settles (see Future Enhancements).
-4. **FAT32 deleted directory entries** for original filenames — the last
+2. **Landing page** once the design settles (see Future Enhancements).
+3. **FAT32 deleted directory entries** for original filenames — the last
    filesystem still showing "Not Available". Worth it only if FAT32 volumes
    (SD cards, older USB sticks) are actually in scope. Note this pairs with the
    landing page's SD Card Recovery category: SD cards are typically FAT32, so
    that category is thin without this parser.
-5. **Scan resume** via a cursor in the manifest, if field testing shows
+4. **Scan resume** via a cursor in the manifest, if field testing shows
    manifests survive real-world use.
-6. App icon, signing, Xcode project — only when distribution matters.
+5. App icon, signing, Xcode project — only when distribution matters.
 
 ## Environment Notes
 
