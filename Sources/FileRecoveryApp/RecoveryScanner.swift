@@ -1,7 +1,21 @@
+import CryptoKit
 import Foundation
+
+/// Tracks fingerprints seen so far in one scan. Reference type so the same set
+/// spans every region; used sequentially from the scan task only.
+private final class DuplicateTracker {
+    private var seen: Set<String> = []
+
+    /// Returns true when this fingerprint was already recorded.
+    func markSeen(_ fingerprint: String?) -> Bool {
+        guard let fingerprint else { return false }
+        return !seen.insert(fingerprint).inserted
+    }
+}
 
 struct RecoveryScanner: Sendable {
     private let chunkSize = 4 * 1024 * 1024
+    private let fingerprintPrefix = 4 * 1024
     private let overlapSize = 128 * 1024
     private let maxCarveSize: UInt64 = 2 * 1024 * 1024 * 1024
     private let jpegSearchCap: UInt64 = 256 * 1024 * 1024
@@ -73,6 +87,7 @@ struct RecoveryScanner: Sendable {
         // Deleted directory entries are first-class results: verify the
         // signature at each entry's data offset and emit it with its original
         // name and exact size. Carving then only adds anonymous extras.
+        let tracker = DuplicateTracker()
         var claimed: [RecoveredItem] = []
         if let source = plan.regions.first?.source, !plan.deletedFiles.isEmpty {
             let freeRanges = plan.regions.map(\.range).sorted { $0.lowerBound < $1.lowerBound }
@@ -84,7 +99,7 @@ struct RecoveryScanner: Sendable {
                 let head = [UInt8](try source.read(at: offset, count: 64))
                 guard let (kind, sniffExt) = sniffKind(head), selectedKinds.contains(kind) else { continue }
                 let nameExt = (entry.name as NSString).pathExtension.lowercased()
-                let item = RecoveredItem(
+                var item = RecoveredItem(
                     kind: kind,
                     source: source,
                     byteOffset: offset,
@@ -93,6 +108,8 @@ struct RecoveryScanner: Sendable {
                     originalFilename: entry.name,
                     segments: entry.segments
                 )
+                item.fingerprint = fingerprint(for: item)
+                item.isDuplicate = tracker.markSeen(item.fingerprint)
                 claimed.append(item)
                 allItems.append(item)
                 await itemFound(item)
@@ -111,6 +128,7 @@ struct RecoveryScanner: Sendable {
                 selectedKinds: selectedKinds,
                 deletedFiles: plan.deletedFiles,
                 claimed: regionClaims,
+                tracker: tracker,
                 pauseGate: pauseGate,
                 progress: progress,
                 itemFound: itemFound
@@ -130,6 +148,7 @@ struct RecoveryScanner: Sendable {
         selectedKinds: Set<MediaKind>,
         deletedFiles: [UInt64: DeletedFileEntry],
         claimed: [RecoveredItem],
+        tracker: DuplicateTracker,
         pauseGate: PauseGate?,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
         itemFound: @escaping @Sendable (RecoveredItem) async -> Void
@@ -163,6 +182,9 @@ struct RecoveryScanner: Sendable {
             ) {
                 guard !overlapsExisting(candidate, in: items),
                       !overlapsExisting(candidate, in: claimed) else { continue }
+                var candidate = candidate
+                candidate.fingerprint = fingerprint(for: candidate)
+                candidate.isDuplicate = tracker.markSeen(candidate.fingerprint)
                 items.append(candidate)
                 await itemFound(candidate)
             }
@@ -183,6 +205,32 @@ struct RecoveryScanner: Sendable {
         }
 
         return items.sorted { $0.byteOffset < $1.byteOffset }
+    }
+
+    /// Hash of the file's first 4 KB plus its exact length. Two results
+    /// matching on both are the same content in every practical case: image
+    /// headers carry EXIF timestamps, serial numbers and thumbnail data, so
+    /// distinct photos don't collide on prefix and byte count together.
+    /// ponytail: prefix only — hashing full contents would double scan I/O.
+    /// Raise fingerprintPrefix, or hash to byteLength, if certainty matters more.
+    private func fingerprint(source: ScanSource, offset: UInt64, length: UInt64) -> String? {
+        let want = Int(min(UInt64(fingerprintPrefix), length))
+        guard want > 0, let head = try? source.read(at: offset, count: want), !head.isEmpty else {
+            return nil
+        }
+        var hasher = SHA256()
+        hasher.update(data: head)
+        withUnsafeBytes(of: length.littleEndian) { hasher.update(bufferPointer: $0) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Fragmented files start at their first data run, not byteOffset.
+    func fingerprint(for item: RecoveredItem) -> String? {
+        fingerprint(
+            source: item.source,
+            offset: item.segments?.first?.lowerBound ?? item.byteOffset,
+            length: item.byteLength
+        )
     }
 
     /// Blocks while the gate is paused; pause latency is at most one chunk
@@ -260,6 +308,11 @@ struct RecoveryScanner: Sendable {
         case 0xFF: // JPEG
             guard kinds.contains(.jpeg), match(bytes, index, [0xFF, 0xD8, 0xFF]) else { return nil }
             let limit = min(regionEnd, absolute &+ jpegSearchCap)
+            // Prefer the structural length; fall back to a raw FFD9 scan when the
+            // segments don't hold, so a damaged JPEG still comes back as before.
+            if let length = try jpegLength(in: source, from: absolute, regionEnd: regionEnd) {
+                return Candidate(kind: .jpeg, start: index, length: length, ext: nil)
+            }
             guard let end = try findMarkerEnd(in: source, from: absolute + 3, limit: limit, marker: [0xFF, 0xD9]) else { return nil }
             return Candidate(kind: .jpeg, start: index, length: end - absolute, ext: nil)
 
@@ -445,6 +498,102 @@ struct RecoveryScanner: Sendable {
 
             offset += UInt64(data.count)
             carry = Array(buffer.suffix(marker.count - 1))
+        }
+        return nil
+    }
+
+    /// Buffered forward byte reader. Segment walking reads a few bytes at a
+    /// time and one pread per byte would be pathological.
+    /// ponytail: forward-only — a backward seek refills the window.
+    private struct ByteWindow {
+        let source: ScanSource
+        let limit: UInt64
+        private var buffer: [UInt8] = []
+        private var bufferStart: UInt64 = 0
+
+        init(source: ScanSource, limit: UInt64) {
+            self.source = source
+            self.limit = limit
+        }
+
+        mutating func byte(at offset: UInt64) throws -> UInt8? {
+            guard offset < limit else { return nil }
+            if offset < bufferStart || offset >= bufferStart &+ UInt64(buffer.count) {
+                let want = Int(min(UInt64(64 * 1024), limit - offset))
+                guard want > 0 else { return nil }
+                buffer = [UInt8](try source.read(at: offset, count: want))
+                bufferStart = offset
+                guard !buffer.isEmpty else { return nil }
+            }
+            return buffer[Int(offset - bufferStart)]
+        }
+
+        /// Big-endian segment length, which includes its own two bytes.
+        mutating func segmentLength(at offset: UInt64) throws -> UInt64? {
+            guard let hi = try byte(at: offset), let lo = try byte(at: offset + 1) else { return nil }
+            let length = UInt64(hi) << 8 | UInt64(lo)
+            return length >= 2 ? length : nil
+        }
+    }
+
+    /// JPEG length by walking the segment structure rather than scanning for
+    /// FFD9. An EXIF thumbnail is a whole JPEG nested in the APP1 segment, so a
+    /// byte scan stops at the thumbnail's end marker and truncates the file.
+    /// Walking skips each segment by its declared length, so only the outer
+    /// image's EOI can match.
+    private func jpegLength(in source: ScanSource, from start: UInt64, regionEnd: UInt64) throws -> UInt64? {
+        let limit = min(regionEnd, start &+ jpegSearchCap)
+        var window = ByteWindow(source: source, limit: limit)
+        var offset = start + 2 // past SOI
+
+        while offset < limit {
+            try Task.checkCancellation()
+            guard let prefix = try window.byte(at: offset), prefix == 0xFF else { return nil }
+
+            // Fill bytes (extra FFs) may pad the gap before a marker id.
+            var idOffset = offset + 1
+            var id: UInt8
+            while true {
+                guard let candidate = try window.byte(at: idOffset) else { return nil }
+                if candidate != 0xFF { id = candidate; break }
+                idOffset += 1
+            }
+            offset = idOffset + 1
+
+            switch id {
+            case 0xD9: // EOI — the real end of the outer image
+                return offset - start
+            case 0x01, 0xD0...0xD7: // standalone markers, no payload
+                continue
+            case 0xDA: // SOS: header, then entropy-coded data up to the next marker
+                guard let length = try window.segmentLength(at: offset) else { return nil }
+                offset += length
+                guard let next = try scanEntropy(&window, from: offset) else { return nil }
+                offset = next
+            default:
+                guard let length = try window.segmentLength(at: offset) else { return nil }
+                offset += length
+            }
+        }
+        return nil
+    }
+
+    /// Walk entropy-coded scan data to the next real marker. Inside it, FF00 is
+    /// a stuffed literal FF and FFD0-FFD7 are restart markers; neither ends the
+    /// scan. Returns the offset of the next marker's FF prefix.
+    private func scanEntropy(_ window: inout ByteWindow, from start: UInt64) throws -> UInt64? {
+        var offset = start
+        while offset < window.limit {
+            try Task.checkCancellation()
+            guard let byte = try window.byte(at: offset) else { return nil }
+            guard byte == 0xFF else { offset += 1; continue }
+            guard let next = try window.byte(at: offset + 1) else { return nil }
+            if next == 0x00 || (0xD0...0xD7).contains(next) {
+                offset += 2
+                continue
+            }
+            if next == 0xFF { offset += 1; continue } // fill byte
+            return offset
         }
         return nil
     }
@@ -889,9 +1038,12 @@ enum RecoveryError: LocalizedError {
     case deviceAccessDenied(String)
     case readFailed(String, UInt64)
     case destinationOnSourceDisk
+    case manifestUnsupported(Int)
 
     var errorDescription: String? {
         switch self {
+        case .manifestUnsupported(let version):
+            "This file list was written by a newer version (format \(version)). Update the app to open it."
         case .sourceMissing(let path): "Source does not exist: \(path)"
         case .cannotEnumerate(let path): "Cannot enumerate source: \(path)"
         case .cannotCreateOutput(let path): "Cannot create output file: \(path)"

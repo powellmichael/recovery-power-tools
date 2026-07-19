@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import SwiftUI
 
 struct ContentView: View {
@@ -69,128 +70,177 @@ private struct Sidebar: View {
     @ObservedObject var viewModel: RecoveryViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Source")
-                    .font(.headline)
-                PathRow(label: viewModel.sourceLabel, placeholder: "No source selected")
-                Menu {
-                    if viewModel.externalDevices.isEmpty {
-                        Text("No external drives found")
-                    }
-                    ForEach(viewModel.externalDevices) { device in
-                        Button(device.displayName) {
-                            viewModel.chooseDevice(device)
+        // The controls scroll; expanding a media category grows the content
+        // rather than pushing the top of the sidebar out of view. Status stays
+        // pinned to the bottom so scan progress is visible while scrolled.
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Source")
+                            .font(.headline)
+                        PathRow(label: viewModel.sourceLabel, placeholder: "No source selected")
+                        Menu {
+                            if viewModel.externalDevices.isEmpty {
+                                Text("No external drives found")
+                            }
+                            ForEach(viewModel.externalDevices) { device in
+                                Button(device.displayName) {
+                                    viewModel.chooseDevice(device)
+                                }
+                            }
+                            Divider()
+                            Button("Refresh") {
+                                viewModel.refreshDevices()
+                            }
+                        } label: {
+                            Label("Choose Drive", systemImage: "externaldrive")
+                        }
+                        Button {
+                            viewModel.chooseSource()
+                        } label: {
+                            Label("Choose File / Folder", systemImage: "folder.badge.gearshape")
+                        }
+
+                        if let warning = viewModel.sourceWarning {
+                            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+
+                        if let warning = viewModel.logWarning {
+                            Label(warning, systemImage: "clock.badge.exclamationmark")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                                .help(warning)
                         }
                     }
-                    Divider()
-                    Button("Refresh") {
-                        viewModel.refreshDevices()
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Destination")
+                            .font(.headline)
+                        PathRow(label: viewModel.destinationURL?.lastPathComponent, placeholder: "No destination selected")
+                        Button {
+                            viewModel.chooseDestination()
+                        } label: {
+                            Label("Choose Folder", systemImage: "folder")
+                        }
                     }
-                } label: {
-                    Label("Choose Drive", systemImage: "externaldrive")
-                }
-                Button {
-                    viewModel.chooseSource()
-                } label: {
-                    Label("Choose File / Folder", systemImage: "folder.badge.gearshape")
-                }
 
-                if let warning = viewModel.sourceWarning {
-                    Label(warning, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Media")
+                            .font(.headline)
+                        MediaFilterList(viewModel: viewModel)
+                    }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Destination")
-                    .font(.headline)
-                PathRow(label: viewModel.destinationURL?.lastPathComponent, placeholder: "No destination selected")
-                Button {
-                    viewModel.chooseDestination()
-                } label: {
-                    Label("Choose Folder", systemImage: "folder")
-                }
-            }
+                    Divider()
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Media")
-                    .font(.headline)
-                MediaFilterList(viewModel: viewModel)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Save as ZIP", isOn: Binding(
+                            get: { viewModel.saveAsZip },
+                            set: { viewModel.saveAsZip = $0 }
+                        ))
+
+                        if viewModel.saveAsZip {
+                            TextField("ZIP name (optional)", text: Binding(
+                                get: { viewModel.zipFileName },
+                                set: { viewModel.zipFileName = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                        }
+
+                        Button {
+                            viewModel.scanButtonPressed()
+                        } label: {
+                            Label("Scan", systemImage: "magnifyingglass")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!viewModel.canScan)
+                        .confirmationDialog(
+                            "A filename filter is active",
+                            isPresented: Binding(
+                                get: { viewModel.showClearFilterPrompt },
+                                set: { viewModel.showClearFilterPrompt = $0 }
+                            )
+                        ) {
+                            Button("Clear filter and scan") { viewModel.confirmScan(clearFilter: true) }
+                            Button("Keep filter and scan") { viewModel.confirmScan(clearFilter: false) }
+                            Button("Cancel", role: .cancel) { viewModel.showClearFilterPrompt = false }
+                        } message: {
+                            Text("“\(viewModel.filenameFilter)” will hide results that don't match. Clear it to see everything the scan finds.")
+                        }
+
+                        Button {
+                            viewModel.recoverSelected()
+                        } label: {
+                            Label("Recover", systemImage: "arrow.down.doc")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(!viewModel.canRecover)
+
+                        if viewModel.isScanActive {
+                            Button {
+                                viewModel.togglePause()
+                            } label: {
+                                Label(
+                                    viewModel.state == .paused ? "Resume" : "Pause",
+                                    systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+
+                            Button {
+                                viewModel.cancelScan()
+                            } label: {
+                                Label("Cancel", systemImage: "xmark.circle")
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("File List")
+                            .font(.headline)
+
+                        Button {
+                            viewModel.exportManifest()
+                        } label: {
+                            Label("Export…", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(viewModel.items.isEmpty)
+                        .help("Save these results so they can be recovered later without re-scanning")
+
+                        Button {
+                            viewModel.importManifest()
+                        } label: {
+                            Label("Import…", systemImage: "square.and.arrow.down")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(viewModel.target == nil || viewModel.isScanActive)
+                        .help("Open a saved list and check it against the selected drive")
+
+                        if let status = viewModel.manifestStatus {
+                            Text(status)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle("Save as ZIP", isOn: Binding(
-                    get: { viewModel.saveAsZip },
-                    set: { viewModel.saveAsZip = $0 }
-                ))
-
-                if viewModel.saveAsZip {
-                    TextField("ZIP name (optional)", text: Binding(
-                        get: { viewModel.zipFileName },
-                        set: { viewModel.zipFileName = $0 }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                }
-
-                Button {
-                    viewModel.scanButtonPressed()
-                } label: {
-                    Label("Scan", systemImage: "magnifyingglass")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!viewModel.canScan)
-                .confirmationDialog(
-                    "A filename filter is active",
-                    isPresented: Binding(
-                        get: { viewModel.showClearFilterPrompt },
-                        set: { viewModel.showClearFilterPrompt = $0 }
-                    )
-                ) {
-                    Button("Clear filter and scan") { viewModel.confirmScan(clearFilter: true) }
-                    Button("Keep filter and scan") { viewModel.confirmScan(clearFilter: false) }
-                    Button("Cancel", role: .cancel) { viewModel.showClearFilterPrompt = false }
-                } message: {
-                    Text("“\(viewModel.filenameFilter)” will hide results that don't match. Clear it to see everything the scan finds.")
-                }
-
-                Button {
-                    viewModel.recoverSelected()
-                } label: {
-                    Label("Recover", systemImage: "arrow.down.doc")
-                        .frame(maxWidth: .infinity)
-                }
-                .disabled(!viewModel.canRecover)
-
-                if viewModel.isScanActive {
-                    Button {
-                        viewModel.togglePause()
-                    } label: {
-                        Label(
-                            viewModel.state == .paused ? "Resume" : "Pause",
-                            systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
-                        )
-                        .frame(maxWidth: .infinity)
-                    }
-
-                    Button {
-                        viewModel.cancelScan()
-                    } label: {
-                        Label("Cancel", systemImage: "xmark.circle")
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-            }
-
-            Spacer()
-
             StatusBlock(viewModel: viewModel)
+                .padding(20)
         }
-        .padding(20)
         .onAppear {
             viewModel.refreshDevices()
         }
@@ -239,6 +289,21 @@ private struct StatusBlock: View {
 
             ProgressView(value: viewModel.progress.fraction)
                 .opacity(viewModel.isScanActive ? 1 : 0.35)
+
+            if let percent = viewModel.progress.percentLabel, viewModel.progress.totalBytes > 0 {
+                HStack(spacing: 6) {
+                    Text(percent)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                    if let bytes = viewModel.progress.byteLabel {
+                        Text(bytes)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .help("Share of the scanned area read so far. Files are found unevenly, so this is an estimate.")
+            }
 
             Text("\(viewModel.items.count) item\(viewModel.items.count == 1 ? "" : "s") found")
                 .font(.caption)
@@ -326,6 +391,9 @@ private struct ResultsView: View {
                     } label: {
                         Label("Select All", systemImage: "checklist.checked")
                     }
+                    .help(viewModel.duplicateCount > 0
+                          ? "Selects everything except \(viewModel.duplicateCount) duplicate\(viewModel.duplicateCount == 1 ? "" : "s")"
+                          : "Selects every visible result")
 
                     Button {
                         viewModel.selectNoneForRecovery()
@@ -375,8 +443,8 @@ private struct ResultsView: View {
 
     private var resultsTable: some View {
         Table(viewModel.filteredItems, selection: Binding(
-                        get: { viewModel.selectedItemID },
-                        set: { viewModel.selectItem($0) }
+                        get: { viewModel.tableSelection },
+                        set: { viewModel.setTableSelection($0) }
                     ), sortOrder: Binding(
                         get: { viewModel.sortOrder },
                         set: { viewModel.sortOrder = $0 }
@@ -384,7 +452,7 @@ private struct ResultsView: View {
                         TableColumn("") { item in
                             Toggle("", isOn: Binding(
                                 get: { viewModel.isSelectedForRecovery(item) },
-                                set: { viewModel.setSelectedForRecovery(item, isSelected: $0) }
+                                set: { viewModel.setSelectedForRecoveryRespectingSelection(item, isSelected: $0) }
                             ))
                             .labelsHidden()
                         }
@@ -404,11 +472,11 @@ private struct ResultsView: View {
                         .width(min: 150, ideal: 200)
 
                         TableColumn("Preview") { item in
-                            if item.kind.isPreviewable {
+                            if item.kind.isPreviewable || item.kind.isVideoPreviewable {
                                 Button {
                                     viewModel.showDetails(for: item)
                                 } label: {
-                                    Image(systemName: "photo")
+                                    Image(systemName: item.kind.isVideoPreviewable ? "play.rectangle" : "photo")
                                         .foregroundStyle(.tint)
                                 }
                                 .buttonStyle(.plain)
@@ -437,6 +505,15 @@ private struct ResultsView: View {
                             } else if item.previouslyRecovered {
                                 Text("Recovered previously")
                                     .foregroundStyle(.orange)
+                            } else if let stale = viewModel.staleReason(for: item) {
+                                Text(stale.rawValue)
+                                    .foregroundStyle(.red)
+                                    .lineLimit(1)
+                                    .help("This data changed since the list was saved, so it can no longer be recovered")
+                            } else if item.isDuplicate {
+                                Text("Duplicate")
+                                    .foregroundStyle(.purple)
+                                    .help("Same first 4 KB and size as an earlier result")
                             } else {
                                 Text("Pending")
                                     .foregroundStyle(.secondary)
@@ -454,6 +531,19 @@ private struct ResultsView: View {
                             .help("Show or hide details")
                         }
                         .width(48)
+        }
+        .contextMenu(forSelectionType: RecoveredItem.ID.self) { ids in
+            if !ids.isEmpty {
+                let count = viewModel.recoverableCount(in: ids)
+                Button("Mark \(count) for Recovery") {
+                    viewModel.setSelectedForRecovery(ids: ids, isSelected: true)
+                }
+                .disabled(count == 0)
+
+                Button("Remove \(ids.count) from Recovery") {
+                    viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
+                }
+            }
         }
     }
 
@@ -480,12 +570,20 @@ private struct MediaFilterList: View {
                     if isOpen { expanded.insert(category) } else { expanded.remove(category) }
                 }
             )) {
-                ForEach(category.kinds) { kind in
-                    Toggle(kind.rawValue, isOn: Binding(
-                        get: { viewModel.selectedKinds.contains(kind) },
-                        set: { _ in viewModel.toggleKind(kind) }
-                    ))
+                // Without an explicit leading alignment each row centres itself,
+                // so "MP4 / MOV" and "AVI" start at different x positions and
+                // the list reads as a staircase.
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(category.kinds) { kind in
+                        Toggle(kind.rawValue, isOn: Binding(
+                            get: { viewModel.selectedKinds.contains(kind) },
+                            set: { _ in viewModel.toggleKind(kind) }
+                        ))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
             } label: {
                 Toggle(isOn: Binding(
                     get: { viewModel.allSelected(in: category) },
@@ -535,13 +633,23 @@ private struct GalleryCell: View {
     @ObservedObject var viewModel: RecoveryViewModel
     let item: RecoveredItem
 
-    private var isSelected: Bool { viewModel.selectedItemID == item.id }
+    private var isSelected: Bool { viewModel.tableSelection.contains(item.id) }
 
     var body: some View {
         VStack(spacing: 8) {
             ZStack(alignment: .topLeading) {
                 Button {
-                    viewModel.toggleDetails(for: item)
+                    // Modifiers are read at click time: SwiftUI buttons don't
+                    // report them, and a plain click must keep toggling the
+                    // preview pane as it always has.
+                    let flags = NSEvent.modifierFlags
+                    if flags.contains(.shift) {
+                        viewModel.extendSelection(to: item)
+                    } else if flags.contains(.command) {
+                        viewModel.toggleSelection(item)
+                    } else {
+                        viewModel.toggleDetails(for: item)
+                    }
                 } label: {
                     thumbnail
                         .frame(maxWidth: .infinity)
@@ -549,11 +657,11 @@ private struct GalleryCell: View {
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
-                .help("Show or hide preview and details")
+                .help("Click to show or hide details. Shift-click to select a range, Command-click to add one.")
 
                 Toggle("", isOn: Binding(
                     get: { viewModel.isSelectedForRecovery(item) },
-                    set: { viewModel.setSelectedForRecovery(item, isSelected: $0) }
+                    set: { viewModel.setSelectedForRecoveryRespectingSelection(item, isSelected: $0) }
                 ))
                 .labelsHidden()
                 .padding(6)
@@ -587,6 +695,19 @@ private struct GalleryCell: View {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 2)
         }
+        .contextMenu {
+            // A right-click on an unselected cell acts on that cell alone.
+            let ids = viewModel.tableSelection.contains(item.id) ? viewModel.tableSelection : [item.id]
+            let count = viewModel.recoverableCount(in: ids)
+            Button("Mark \(count) for Recovery") {
+                viewModel.setSelectedForRecovery(ids: ids, isSelected: true)
+            }
+            .disabled(count == 0)
+
+            Button("Remove \(ids.count) from Recovery") {
+                viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
+            }
+        }
     }
 
     @ViewBuilder
@@ -596,10 +717,75 @@ private struct GalleryCell: View {
                 .resizable()
                 .scaledToFit()
                 .padding(4)
+                .overlay(alignment: .bottomTrailing) {
+                    if item.kind.isVideoPreviewable {
+                        Image(systemName: "play.circle.fill")
+                            .font(.title2)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .black.opacity(0.55))
+                            .padding(8)
+                    }
+                }
         } else {
             Image(systemName: icon(for: item.kind))
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// SwiftUI's VideoPlayer crashes in a bare SwiftPM executable — its Swift
+/// metadata can't resolve AVPlayerView's ObjC superclass at runtime. Hosting
+/// AVPlayerView ourselves gives the same transport controls without it.
+private struct PlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.videoGravity = .resizeAspect
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        if view.player !== player { view.player = player }
+    }
+}
+
+/// EXIF rows. Each appears only when the carved file actually carried the field,
+/// since most photos have no GPS and plenty have no lens or exposure data.
+private struct ExifRows: View {
+    let metadata: ImageMetadata
+
+    var body: some View {
+        if let value = metadata.pixelSize {
+            MetadataRow(label: "Dimensions", value: value)
+        }
+        if let value = metadata.captureDate {
+            MetadataRow(label: "Captured", value: value)
+        }
+        if let value = metadata.camera {
+            MetadataRow(label: "Camera", value: value)
+        }
+        if let value = metadata.lens {
+            MetadataRow(label: "Lens", value: value)
+        }
+        if let value = metadata.exposure {
+            MetadataRow(label: "Exposure", value: value)
+        }
+        if let coordinate = metadata.coordinate {
+            GridRow {
+                Text("Location")
+                    .foregroundStyle(.secondary)
+                if let url = coordinate.mapsURL {
+                    Link(coordinate.label, destination: url)
+                        .help("Open in Maps")
+                } else {
+                    Text(coordinate.label)
+                        .textSelection(.enabled)
+                }
+            }
         }
     }
 }
@@ -632,6 +818,11 @@ private struct PreviewPane: View {
                     MetadataRow(label: "Offset", value: "0x\(String(item.byteOffset, radix: 16).uppercased())")
                     MetadataRow(label: "Source", value: item.source.displayName)
                     MetadataRow(label: "Selected", value: viewModel.isSelectedForRecovery(item) ? "Yes" : "No")
+
+                    if !viewModel.previewMetadata.isEmpty {
+                        Divider()
+                        ExifRows(metadata: viewModel.previewMetadata)
+                    }
                 }
                 .font(.callout)
             } else {
@@ -658,7 +849,11 @@ private struct PreviewPane: View {
             }
             .buttonStyle(.plain)
             .help("View full size")
-        } else if let item = viewModel.selectedItem, !item.kind.isPreviewable {
+        } else if let player = viewModel.previewPlayer {
+            PlayerView(player: player)
+                .padding(4)
+        } else if let item = viewModel.selectedItem,
+                  !item.kind.isPreviewable, !item.kind.isVideoPreviewable {
             VStack(spacing: 10) {
                 Image(systemName: icon(for: item.kind))
                     .font(.system(size: 42))

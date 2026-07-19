@@ -1,7 +1,9 @@
+import AVKit
 import AppKit
 import Foundation
 import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class RecoveryViewModel: ObservableObject {
@@ -12,8 +14,15 @@ final class RecoveryViewModel: ObservableObject {
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
     @Published var selectedItemID: RecoveredItem.ID?
+    /// Highlighted rows. Shift- and command-click build this set; the preview
+    /// pane follows it only when exactly one row is selected.
+    @Published var tableSelection: Set<RecoveredItem.ID> = []
+    /// Where a shift-click range starts. Set by a plain or command click.
+    private var selectionAnchorID: RecoveredItem.ID?
     @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = []
     @Published var previewImage: NSImage?
+    @Published var previewPlayer: AVPlayer?
+    @Published var previewMetadata = ImageMetadata()
     @Published var previewFileURL: URL?
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
@@ -51,10 +60,19 @@ final class RecoveryViewModel: ObservableObject {
 
     private var scanTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
+    /// Defers preview work out of NSTableView's selection delegate; separate
+    /// from previewTask, which owns the carve-and-decode itself.
+    private var previewSelectionTask: Task<Void, Never>?
     private var pendingItems: [RecoveredItem] = []
     private var flushScheduled = false
     private var pauseGate: PauseGate?
     private var recoveryLog = RecoveryLog.load()
+    @Published var manifestStatus: String?
+    /// Manifest entries whose data no longer matches the drive.
+    @Published private(set) var staleReasons: [RecoveredItem.ID: RecoveryManifest.Staleness] = [:]
+    /// Surfaced in the sidebar when recovery history can't be read or written.
+    /// Recovery still works; only the "previously recovered" tracking is lost.
+    @Published var logWarning: String?
     private var currentVolumeID: UInt64 = 0
 
     /// Stable identity for a found file across scans: volume serial (when the
@@ -67,6 +85,10 @@ final class RecoveryViewModel: ObservableObject {
     private let scanner = RecoveryScanner()
 
     init() {
+        // An unreadable history file is surfaced immediately, not on first save:
+        // the user should know tracking is off before they recover anything.
+        logWarning = recoveryLog.loadError
+
         // SwiftUI's Table focus and bare-key shortcuts are both unreliable on
         // macOS; an AppKit event monitor always sees arrow keys.
         // ponytail: monitor lives for the app's lifetime, never removed —
@@ -156,9 +178,8 @@ final class RecoveryViewModel: ObservableObject {
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
-        previewImage = nil
-        previewFileURL = nil
-        previewError = nil
+        tableSelection = []
+        clearPreview()
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
@@ -182,6 +203,120 @@ final class RecoveryViewModel: ObservableObject {
         if panel.runModal() == .OK {
             destinationURL = panel.url
         }
+    }
+
+    // MARK: - Manifests
+
+    /// Writes the current results to a JSON file so they can be recovered later
+    /// without re-scanning. Exporting mid-scan is allowed and records the list
+    /// as partial.
+    func exportManifest() {
+        guard !items.isEmpty else { return }
+
+        let panel = NSSavePanel()
+        panel.title = "Export File List"
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "file-list-\(Self.fileStamp()).json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let manifest = RecoveryManifest(
+            items: items,
+            volumeID: currentVolumeID,
+            sourceName: items.first?.source.displayName ?? "",
+            scanNote: scanNote,
+            scanComplete: state == .finished
+        )
+
+        do {
+            try manifest.encoded().write(to: url, options: .atomic)
+            manifestStatus = "Exported \(items.count) entries to \(url.lastPathComponent)."
+                + (manifest.scanComplete ? "" : " Scan was still running, so the list is partial.")
+        } catch {
+            manifestStatus = "Could not export: \(error.localizedDescription)"
+        }
+    }
+
+    /// Loads a manifest and checks each entry against the drive currently
+    /// selected. Nothing is recovered here — stale entries are shown, not
+    /// dropped, so it's clear what's no longer on the disk.
+    func importManifest() {
+        guard let target else {
+            manifestStatus = "Choose the drive this list came from first."
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = "Open File List"
+        panel.allowedContentTypes = [.json]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        state = .scanning
+        manifestStatus = "Verifying against the drive…"
+
+        let scanner = scanner
+        scanTask = Task { [weak self] in
+            do {
+                let manifest = try RecoveryManifest.decode(try Data(contentsOf: url))
+                // Re-planning opens the device (and prompts for authorization)
+                // and re-reads the volume serial, which is what makes the
+                // "same drive?" check meaningful.
+                let plan = try await scanner.makePlan(for: target)
+                guard let source = plan.regions.first?.source else {
+                    throw RecoveryError.cannotOpen(url.path)
+                }
+                let verified = scanner.verify(manifest: manifest, against: source, volumeID: plan.volumeID)
+                try Task.checkCancellation()
+                await MainActor.run { self?.applyImported(verified, manifest: manifest) }
+            } catch is CancellationError {
+                await MainActor.run { self?.state = .idle }
+            } catch {
+                await MainActor.run {
+                    self?.state = .failed(error.localizedDescription)
+                    self?.manifestStatus = nil
+                }
+            }
+        }
+    }
+
+    private func applyImported(_ verified: [VerifiedEntry], manifest: RecoveryManifest) {
+        currentVolumeID = manifest.volumeID
+        scanNote = manifest.scanNote
+        items = verified.map(\.item)
+        staleReasons = Dictionary(
+            uniqueKeysWithValues: verified.compactMap { entry in
+                entry.staleness.map { (entry.item.id, $0) }
+            }
+        )
+        // The manifest's recovered flags describe the machine that wrote it;
+        // the local log stays authoritative for this one.
+        for index in items.indices {
+            items[index].previouslyRecovered =
+                recoveryLog.contains(logKey(for: items[index])) || items[index].previouslyRecovered
+        }
+        selectedRecoveryIDs = []
+        selectedItemID = nil
+        tableSelection = []
+        clearThumbnails()
+
+        let stale = staleReasons.count
+        let recoverable = items.count - stale
+        manifestStatus = stale == 0
+            ? "All \(items.count) entries verified against the drive."
+            : "\(recoverable) of \(items.count) entries still match the drive; \(stale) changed and can't be recovered."
+        state = .finished
+    }
+
+    /// Stale entries can't be recovered — their bytes are gone or moved.
+    func staleReason(for item: RecoveredItem) -> RecoveryManifest.Staleness? {
+        staleReasons[item.id]
+    }
+
+    private static func fileStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmm"
+        return formatter.string(from: Date())
     }
 
     func toggleKind(_ kind: MediaKind) {
@@ -232,9 +367,8 @@ final class RecoveryViewModel: ObservableObject {
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
-        previewImage = nil
-        previewFileURL = nil
-        previewError = nil
+        tableSelection = []
+        clearPreview()
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
@@ -351,8 +485,12 @@ final class RecoveryViewModel: ObservableObject {
     /// ponytail: unbounded cache, no eviction — add an LRU if a scan with tens
     /// of thousands of images starts hurting memory.
     func requestThumbnail(for item: RecoveredItem) {
-        guard item.kind.isPreviewable,
-              item.byteLength <= 64 * 1024 * 1024,
+        let isVideo = item.kind.isVideoPreviewable
+        // Videos have to be written out whole before a frame can be grabbed, so
+        // they get a higher cap than images but still not an unlimited one.
+        let sizeCap: UInt64 = isVideo ? 256 * 1024 * 1024 : 64 * 1024 * 1024
+        guard item.kind.isPreviewable || isVideo,
+              item.byteLength <= sizeCap,
               thumbnailsRequested.insert(item.id).inserted else { return }
 
         let scanner = scanner
@@ -363,9 +501,23 @@ final class RecoveryViewModel: ObservableObject {
             try? scanner.write(item, to: url)
             // NSImage isn't Sendable, so hand back PNG bytes and build the
             // image on the main actor.
-            guard let data = Self.thumbnailData(at: url, maxPixel: 320) else { return }
+            let data = isVideo
+                ? await Self.videoThumbnailData(at: url, maxPixel: 320)
+                : Self.thumbnailData(at: url, maxPixel: 320)
+            guard let data else { return }
             await self?.setThumbnail(data, for: itemID)
         }
+    }
+
+    /// First decodable frame of a carved video. Tolerance is wide open so the
+    /// generator can settle on the nearest keyframe instead of failing.
+    private nonisolated static func videoThumbnailData(at url: URL, maxPixel: Int) async -> Data? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+        generator.requestedTimeToleranceAfter = .positiveInfinity
+        guard let cgImage = try? await generator.image(at: .zero).image else { return nil }
+        return pngData(cgImage)
     }
 
     private func setThumbnail(_ data: Data, for itemID: RecoveredItem.ID) {
@@ -380,8 +532,14 @@ final class RecoveryViewModel: ObservableObject {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
         ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-              let output = CFDataCreateMutable(nil, 0),
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return pngData(cgImage)
+    }
+
+    private nonisolated static func pngData(_ cgImage: CGImage) -> Data? {
+        guard let output = CFDataCreateMutable(nil, 0),
               let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else {
             return nil
         }
@@ -407,15 +565,94 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
-    func selectItem(_ itemID: RecoveredItem.ID?) {
-        selectedItemID = itemID
-        guard let item = selectedItem else {
-            previewImage = nil
-            previewFileURL = nil
-            previewError = nil
+    /// Table selection binding. A single row previews; several rows leave the
+    /// preview alone, since there's no one file to show.
+    func setTableSelection(_ ids: Set<RecoveredItem.ID>) {
+        tableSelection = ids
+        if ids.count == 1, let only = ids.first {
+            selectItem(only)
+        } else if ids.isEmpty {
+            selectItem(nil)
+        }
+    }
+
+    /// Applies a recovery checkbox to every highlighted row when the clicked
+    /// row is part of a multi-row selection, so shift-selecting a range and
+    /// ticking one box marks the whole range.
+    func setSelectedForRecoveryRespectingSelection(_ item: RecoveredItem, isSelected: Bool) {
+        guard tableSelection.count > 1, tableSelection.contains(item.id) else {
+            setSelectedForRecovery(item, isSelected: isSelected)
             return
         }
-        preparePreview(for: item)
+        for id in tableSelection {
+            guard let match = items.first(where: { $0.id == id }) else { continue }
+            setSelectedForRecovery(match, isSelected: isSelected)
+        }
+    }
+
+    /// Command-click: add or remove one item without disturbing the rest.
+    func toggleSelection(_ item: RecoveredItem) {
+        if tableSelection.contains(item.id) {
+            tableSelection.remove(item.id)
+            if selectedItemID == item.id { selectedItemID = tableSelection.count == 1 ? tableSelection.first : nil }
+        } else {
+            tableSelection.insert(item.id)
+            selectionAnchorID = item.id
+        }
+    }
+
+    /// Shift-click: select everything between the anchor and this item in the
+    /// order currently shown, so the range matches what the user sees rather
+    /// than the underlying scan order.
+    func extendSelection(to item: RecoveredItem) {
+        let visible = filteredItems
+        guard let end = visible.firstIndex(where: { $0.id == item.id }) else { return }
+        let anchor = selectionAnchorID ?? selectedItemID
+        guard let anchor, let start = visible.firstIndex(where: { $0.id == anchor }) else {
+            setTableSelection([item.id])
+            selectionAnchorID = item.id
+            return
+        }
+        let range = start <= end ? start...end : end...start
+        tableSelection = Set(visible[range].map(\.id))
+    }
+
+    /// Context-menu action over whatever rows are highlighted.
+    func setSelectedForRecovery(ids: Set<RecoveredItem.ID>, isSelected: Bool) {
+        for id in ids {
+            guard let match = items.first(where: { $0.id == id }) else { continue }
+            setSelectedForRecovery(match, isSelected: isSelected)
+        }
+    }
+
+    /// How many of the highlighted rows can actually be recovered — stale
+    /// manifest entries can't, so a menu title of "Mark 40" would be a lie.
+    func recoverableCount(in ids: Set<RecoveredItem.ID>) -> Int {
+        ids.filter { staleReasons[$0] == nil }.count
+    }
+
+    func selectItem(_ itemID: RecoveredItem.ID?) {
+        guard itemID != selectedItemID else { return }
+        selectedItemID = itemID
+        // Keep the highlight in step when selection comes from elsewhere
+        // (arrow keys, the Preview column, gallery clicks).
+        if let itemID { tableSelection = [itemID] } else { tableSelection = [] }
+        selectionAnchorID = itemID
+
+        // Table's selection binding calls this from inside NSTableView's
+        // delegate. Tearing down preview state here publishes more changes, so
+        // SwiftUI re-renders the table mid-delegate and AppKit warns about
+        // reentrancy. The selection itself must land now for the row to
+        // highlight; the preview can wait for the next runloop turn.
+        previewSelectionTask?.cancel()
+        previewSelectionTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
+            guard let item = selectedItem else {
+                clearPreview()
+                return
+            }
+            preparePreview(for: item)
+        }
     }
 
     func isSelectedForRecovery(_ item: RecoveredItem) -> Bool {
@@ -423,6 +660,9 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func setSelectedForRecovery(_ item: RecoveredItem, isSelected: Bool) {
+        // A stale manifest entry's bytes are gone; recovering it would write
+        // whatever now occupies that offset.
+        guard staleReasons[item.id] == nil else { return }
         if isSelected {
             selectedRecoveryIDs.insert(item.id)
         } else {
@@ -432,8 +672,19 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Selects the visible (filtered) items, so a filename filter can scope
     /// exactly what gets recovered.
+    /// Skips duplicates so one click doesn't queue the same photo several
+    /// times. They stay individually selectable — the flag is a heuristic, so
+    /// nothing is hidden or blocked on its strength.
     func selectAllForRecovery() {
-        selectedRecoveryIDs.formUnion(filteredItems.map(\.id))
+        selectedRecoveryIDs.formUnion(
+            filteredItems.lazy
+                .filter { !$0.isDuplicate && self.staleReasons[$0.id] == nil }
+                .map(\.id)
+        )
+    }
+
+    var duplicateCount: Int {
+        filteredItems.lazy.filter(\.isDuplicate).count
     }
 
     func selectNoneForRecovery() {
@@ -534,7 +785,7 @@ final class RecoveryViewModel: ObservableObject {
             }
         }
         if recordedAny {
-            recoveryLog.save()
+            logWarning = recoveryLog.save()
             if clearZipNameOnSuccess {
                 zipFileName = ""
             }
@@ -542,13 +793,63 @@ final class RecoveryViewModel: ObservableObject {
         state = .finished
     }
 
-    private func preparePreview(for item: RecoveredItem) {
-        previewTask?.cancel()
+    func clearPreview() {
+        previewPlayer?.pause()
+        previewPlayer = nil
         previewImage = nil
+        previewMetadata = ImageMetadata()
         previewFileURL = nil
         previewError = nil
+    }
 
-        guard item.kind.isPreviewable else { return }
+    /// EXIF/TIFF/GPS from the carved bytes. Reads the same temp file the preview
+    /// already writes, so nothing has to be recovered first.
+    nonisolated static func imageMetadata(at url: URL) -> ImageMetadata {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return ImageMetadata()
+        }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+
+        var meta = ImageMetadata()
+
+        if let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int {
+            meta.pixelSize = "\(w) x \(h)"
+        }
+        meta.captureDate = exif[kCGImagePropertyExifDateTimeOriginal] as? String
+        let make = tiff[kCGImagePropertyTIFFMake] as? String
+        let model = tiff[kCGImagePropertyTIFFModel] as? String
+        // Models often already include the make ("Canon EOS R5"); don't repeat it.
+        meta.camera = [make, model].compactMap { $0 }.isEmpty ? nil
+            : (model.map { m in make.map { m.hasPrefix($0) ? m : "\($0) \(m)" } ?? m } ?? make)
+        meta.lens = exif[kCGImagePropertyExifLensModel] as? String
+        if let speed = exif[kCGImagePropertyExifExposureTime] as? Double,
+           let fnum = exif[kCGImagePropertyExifFNumber] as? Double {
+            let shutter = speed >= 1 ? String(format: "%.0fs", speed) : "1/\(Int((1 / speed).rounded()))s"
+            let iso = (exif[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first
+            meta.exposure = "\(shutter) · f/\(String(format: "%.1f", fnum))" + (iso.map { " · ISO \($0)" } ?? "")
+        }
+        // GPS stores unsigned degrees plus a hemisphere reference; apply the sign.
+        if let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
+           let lon = gps[kCGImagePropertyGPSLongitude] as? Double {
+            let latRef = gps[kCGImagePropertyGPSLatitudeRef] as? String ?? "N"
+            let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String ?? "E"
+            meta.coordinate = ImageMetadata.Coordinate(
+                latitude: latRef == "S" ? -lat : lat,
+                longitude: lonRef == "W" ? -lon : lon
+            )
+        }
+        return meta
+    }
+
+    private func preparePreview(for item: RecoveredItem) {
+        previewTask?.cancel()
+        clearPreview()
+
+        let isVideo = item.kind.isVideoPreviewable
+        guard item.kind.isPreviewable || isVideo else { return }
 
         let scanner = scanner
         previewTask = Task {
@@ -557,11 +858,26 @@ final class RecoveryViewModel: ObservableObject {
                 try scanner.write(item, to: outputURL)
                 try Task.checkCancellation()
 
+                if isVideo {
+                    // A carved video can be truncated or in a container AVFoundation
+                    // won't decode, so ask the asset before handing it to a player.
+                    let playable = (try? await AVURLAsset(url: outputURL).load(.isPlayable)) ?? false
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        previewFileURL = outputURL
+                        previewPlayer = playable ? AVPlayer(url: outputURL) : nil
+                        previewError = playable ? nil : "\(item.kind.rawValue) playback not supported"
+                    }
+                    return
+                }
+
                 let image = NSImage(contentsOf: outputURL)
+                let metadata = Self.imageMetadata(at: outputURL)
 
                 await MainActor.run {
                     previewFileURL = outputURL
                     previewImage = image
+                    previewMetadata = metadata
                     previewError = image == nil ? "Preview unavailable" : nil
                 }
             } catch is CancellationError {
