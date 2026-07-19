@@ -570,12 +570,20 @@ private struct MediaFilterList: View {
                     if isOpen { expanded.insert(category) } else { expanded.remove(category) }
                 }
             )) {
-                ForEach(category.kinds) { kind in
-                    Toggle(kind.rawValue, isOn: Binding(
-                        get: { viewModel.selectedKinds.contains(kind) },
-                        set: { _ in viewModel.toggleKind(kind) }
-                    ))
+                // Without an explicit leading alignment each row centres itself,
+                // so "MP4 / MOV" and "AVI" start at different x positions and
+                // the list reads as a staircase.
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(category.kinds) { kind in
+                        Toggle(kind.rawValue, isOn: Binding(
+                            get: { viewModel.selectedKinds.contains(kind) },
+                            set: { _ in viewModel.toggleKind(kind) }
+                        ))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
             } label: {
                 Toggle(isOn: Binding(
                     get: { viewModel.allSelected(in: category) },

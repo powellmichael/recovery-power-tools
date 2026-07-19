@@ -173,6 +173,11 @@ so tests never touch the real file.
 
 None currently open.
 
+Recently closed: media category rows rendered as a staircase because
+`DisclosureGroup` children had no explicit leading alignment, so each row
+centred itself and labels of different widths ("MP4 / MOV" vs "AVI") started
+at different x positions.
+
 ## Known Limitations / Deliberate Deferrals
 
 - **FAT32 filenames unavailable.** exFAT and NTFS both supply original names
