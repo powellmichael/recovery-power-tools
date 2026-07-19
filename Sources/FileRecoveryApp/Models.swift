@@ -1,6 +1,6 @@
 import Foundation
 
-enum MediaKind: String, CaseIterable, Identifiable, Sendable {
+enum MediaKind: String, CaseIterable, Identifiable, Codable, Sendable {
     case jpeg = "JPEG"
     case png = "PNG"
     case heic = "HEIC"
@@ -208,6 +208,9 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     /// True when an earlier result in this scan had the same fingerprint.
     /// A heuristic, not proof — see RecoveryScanner.fingerprint.
     var isDuplicate = false
+    /// Prefix-and-length hash, kept so a manifest can re-verify this data is
+    /// still on the drive before recovering from recorded offsets.
+    var fingerprint: String?
 
     var displayName: String {
         originalFilename

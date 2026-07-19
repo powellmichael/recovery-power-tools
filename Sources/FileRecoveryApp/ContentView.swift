@@ -195,6 +195,38 @@ private struct Sidebar: View {
                 }
             }
 
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("File List")
+                    .font(.headline)
+
+                Button {
+                    viewModel.exportManifest()
+                } label: {
+                    Label("Export…", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(viewModel.items.isEmpty)
+                .help("Save these results so they can be recovered later without re-scanning")
+
+                Button {
+                    viewModel.importManifest()
+                } label: {
+                    Label("Import…", systemImage: "square.and.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(viewModel.target == nil || viewModel.isScanActive)
+                .help("Open a saved list and check it against the selected drive")
+
+                if let status = viewModel.manifestStatus {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Spacer()
 
             StatusBlock(viewModel: viewModel)
@@ -449,6 +481,11 @@ private struct ResultsView: View {
                             } else if item.previouslyRecovered {
                                 Text("Recovered previously")
                                     .foregroundStyle(.orange)
+                            } else if let stale = viewModel.staleReason(for: item) {
+                                Text(stale.rawValue)
+                                    .foregroundStyle(.red)
+                                    .lineLimit(1)
+                                    .help("This data changed since the list was saved, so it can no longer be recovered")
                             } else if item.isDuplicate {
                                 Text("Duplicate")
                                     .foregroundStyle(.purple)

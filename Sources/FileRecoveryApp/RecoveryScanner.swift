@@ -108,7 +108,8 @@ struct RecoveryScanner: Sendable {
                     originalFilename: entry.name,
                     segments: entry.segments
                 )
-                item.isDuplicate = tracker.markSeen(fingerprint(for: item))
+                item.fingerprint = fingerprint(for: item)
+                item.isDuplicate = tracker.markSeen(item.fingerprint)
                 claimed.append(item)
                 allItems.append(item)
                 await itemFound(item)
@@ -182,7 +183,8 @@ struct RecoveryScanner: Sendable {
                 guard !overlapsExisting(candidate, in: items),
                       !overlapsExisting(candidate, in: claimed) else { continue }
                 var candidate = candidate
-                candidate.isDuplicate = tracker.markSeen(fingerprint(for: candidate))
+                candidate.fingerprint = fingerprint(for: candidate)
+                candidate.isDuplicate = tracker.markSeen(candidate.fingerprint)
                 items.append(candidate)
                 await itemFound(candidate)
             }
@@ -223,7 +225,7 @@ struct RecoveryScanner: Sendable {
     }
 
     /// Fragmented files start at their first data run, not byteOffset.
-    private func fingerprint(for item: RecoveredItem) -> String? {
+    func fingerprint(for item: RecoveredItem) -> String? {
         fingerprint(
             source: item.source,
             offset: item.segments?.first?.lowerBound ?? item.byteOffset,
@@ -1036,9 +1038,12 @@ enum RecoveryError: LocalizedError {
     case deviceAccessDenied(String)
     case readFailed(String, UInt64)
     case destinationOnSourceDisk
+    case manifestUnsupported(Int)
 
     var errorDescription: String? {
         switch self {
+        case .manifestUnsupported(let version):
+            "This file list was written by a newer version (format \(version)). Update the app to open it."
         case .sourceMissing(let path): "Source does not exist: \(path)"
         case .cannotEnumerate(let path): "Cannot enumerate source: \(path)"
         case .cannotCreateOutput(let path): "Cannot create output file: \(path)"

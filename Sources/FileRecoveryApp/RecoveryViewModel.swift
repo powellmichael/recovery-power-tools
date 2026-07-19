@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class RecoveryViewModel: ObservableObject {
@@ -61,6 +62,9 @@ final class RecoveryViewModel: ObservableObject {
     private var flushScheduled = false
     private var pauseGate: PauseGate?
     private var recoveryLog = RecoveryLog.load()
+    @Published var manifestStatus: String?
+    /// Manifest entries whose data no longer matches the drive.
+    @Published private(set) var staleReasons: [RecoveredItem.ID: RecoveryManifest.Staleness] = [:]
     /// Surfaced in the sidebar when recovery history can't be read or written.
     /// Recovery still works; only the "previously recovered" tracking is lost.
     @Published var logWarning: String?
@@ -193,6 +197,119 @@ final class RecoveryViewModel: ObservableObject {
         if panel.runModal() == .OK {
             destinationURL = panel.url
         }
+    }
+
+    // MARK: - Manifests
+
+    /// Writes the current results to a JSON file so they can be recovered later
+    /// without re-scanning. Exporting mid-scan is allowed and records the list
+    /// as partial.
+    func exportManifest() {
+        guard !items.isEmpty else { return }
+
+        let panel = NSSavePanel()
+        panel.title = "Export File List"
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "file-list-\(Self.fileStamp()).json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let manifest = RecoveryManifest(
+            items: items,
+            volumeID: currentVolumeID,
+            sourceName: items.first?.source.displayName ?? "",
+            scanNote: scanNote,
+            scanComplete: state == .finished
+        )
+
+        do {
+            try manifest.encoded().write(to: url, options: .atomic)
+            manifestStatus = "Exported \(items.count) entries to \(url.lastPathComponent)."
+                + (manifest.scanComplete ? "" : " Scan was still running, so the list is partial.")
+        } catch {
+            manifestStatus = "Could not export: \(error.localizedDescription)"
+        }
+    }
+
+    /// Loads a manifest and checks each entry against the drive currently
+    /// selected. Nothing is recovered here — stale entries are shown, not
+    /// dropped, so it's clear what's no longer on the disk.
+    func importManifest() {
+        guard let target else {
+            manifestStatus = "Choose the drive this list came from first."
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = "Open File List"
+        panel.allowedContentTypes = [.json]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        state = .scanning
+        manifestStatus = "Verifying against the drive…"
+
+        let scanner = scanner
+        scanTask = Task { [weak self] in
+            do {
+                let manifest = try RecoveryManifest.decode(try Data(contentsOf: url))
+                // Re-planning opens the device (and prompts for authorization)
+                // and re-reads the volume serial, which is what makes the
+                // "same drive?" check meaningful.
+                let plan = try await scanner.makePlan(for: target)
+                guard let source = plan.regions.first?.source else {
+                    throw RecoveryError.cannotOpen(url.path)
+                }
+                let verified = scanner.verify(manifest: manifest, against: source, volumeID: plan.volumeID)
+                try Task.checkCancellation()
+                await MainActor.run { self?.applyImported(verified, manifest: manifest) }
+            } catch is CancellationError {
+                await MainActor.run { self?.state = .idle }
+            } catch {
+                await MainActor.run {
+                    self?.state = .failed(error.localizedDescription)
+                    self?.manifestStatus = nil
+                }
+            }
+        }
+    }
+
+    private func applyImported(_ verified: [VerifiedEntry], manifest: RecoveryManifest) {
+        currentVolumeID = manifest.volumeID
+        scanNote = manifest.scanNote
+        items = verified.map(\.item)
+        staleReasons = Dictionary(
+            uniqueKeysWithValues: verified.compactMap { entry in
+                entry.staleness.map { (entry.item.id, $0) }
+            }
+        )
+        // The manifest's recovered flags describe the machine that wrote it;
+        // the local log stays authoritative for this one.
+        for index in items.indices {
+            items[index].previouslyRecovered =
+                recoveryLog.contains(logKey(for: items[index])) || items[index].previouslyRecovered
+        }
+        selectedRecoveryIDs = []
+        selectedItemID = nil
+        clearThumbnails()
+
+        let stale = staleReasons.count
+        let recoverable = items.count - stale
+        manifestStatus = stale == 0
+            ? "All \(items.count) entries verified against the drive."
+            : "\(recoverable) of \(items.count) entries still match the drive; \(stale) changed and can't be recovered."
+        state = .finished
+    }
+
+    /// Stale entries can't be recovered — their bytes are gone or moved.
+    func staleReason(for item: RecoveredItem) -> RecoveryManifest.Staleness? {
+        staleReasons[item.id]
+    }
+
+    private static func fileStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmm"
+        return formatter.string(from: Date())
     }
 
     func toggleKind(_ kind: MediaKind) {
@@ -465,6 +582,9 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func setSelectedForRecovery(_ item: RecoveredItem, isSelected: Bool) {
+        // A stale manifest entry's bytes are gone; recovering it would write
+        // whatever now occupies that offset.
+        guard staleReasons[item.id] == nil else { return }
         if isSelected {
             selectedRecoveryIDs.insert(item.id)
         } else {
@@ -478,7 +598,11 @@ final class RecoveryViewModel: ObservableObject {
     /// times. They stay individually selectable — the flag is a heuristic, so
     /// nothing is hidden or blocked on its strength.
     func selectAllForRecovery() {
-        selectedRecoveryIDs.formUnion(filteredItems.lazy.filter { !$0.isDuplicate }.map(\.id))
+        selectedRecoveryIDs.formUnion(
+            filteredItems.lazy
+                .filter { !$0.isDuplicate && self.staleReasons[$0.id] == nil }
+                .map(\.id)
+        )
     }
 
     var duplicateCount: Int {
