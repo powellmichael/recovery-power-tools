@@ -125,21 +125,43 @@ enum RecoveredVisibility: String, CaseIterable, Identifiable {
 
 /// Persistent record of recovered files, keyed by volume serial + location,
 /// so repeat scans can show what was already recovered.
+///
+/// This file is irreplaceable — it's the only record that a given deleted file
+/// was already pulled off a drive. So an unreadable file is never treated as an
+/// empty one: that would let the next save overwrite thousands of records with
+/// a handful. A load failure sets `isReadable = false`, which blocks saving
+/// until a human deals with it.
 struct RecoveryLog {
     private var keys: Set<String>
+    /// Injectable so tests never touch the real history file.
+    private let fileURL: URL
+    /// False when the file exists but couldn't be parsed. Saving is refused.
+    private(set) var isReadable = true
+    private(set) var loadError: String?
 
-    private static var fileURL: URL {
+    static var defaultURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FileRecovery", isDirectory: true)
             .appendingPathComponent("recovered.json")
     }
 
-    static func load() -> RecoveryLog {
-        guard let data = try? Data(contentsOf: fileURL),
-              let keys = try? JSONDecoder().decode(Set<String>.self, from: data) else {
-            return RecoveryLog(keys: [])
+    static func load(from url: URL = defaultURL) -> RecoveryLog {
+        // No file yet is the normal first-run case, not a failure.
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return RecoveryLog(keys: [], fileURL: url)
         }
-        return RecoveryLog(keys: keys)
+        do {
+            let data = try Data(contentsOf: url)
+            let keys = try JSONDecoder().decode(Set<String>.self, from: data)
+            return RecoveryLog(keys: keys, fileURL: url)
+        } catch {
+            var log = RecoveryLog(keys: [], fileURL: url)
+            log.isReadable = false
+            log.loadError = "Recovery history at \(url.path) could not be read "
+                + "(\(error.localizedDescription)). It will not be overwritten. "
+                + "Move or repair the file to resume tracking."
+            return log
+        }
     }
 
     func contains(_ key: String) -> Bool {
@@ -150,12 +172,22 @@ struct RecoveryLog {
         keys.insert(key)
     }
 
-    func save() {
-        try? FileManager.default.createDirectory(
-            at: Self.fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try? JSONEncoder().encode(keys).write(to: Self.fileURL)
+    /// Returns an error string when the log could not be written.
+    @discardableResult
+    func save() -> String? {
+        guard isReadable else { return loadError }
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            // Atomic: a crash or unplug mid-write would otherwise truncate the
+            // file, and a truncated file won't parse on next launch.
+            try JSONEncoder().encode(keys).write(to: fileURL, options: .atomic)
+            return nil
+        } catch {
+            return "Could not save recovery history: \(error.localizedDescription)"
+        }
     }
 }
 
@@ -173,6 +205,9 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     var recoveryError: String?
     /// True when the recovery log says this file was recovered in a past run.
     var previouslyRecovered = false
+    /// True when an earlier result in this scan had the same fingerprint.
+    /// A heuristic, not proof — see RecoveryScanner.fingerprint.
+    var isDuplicate = false
 
     var displayName: String {
         originalFilename
@@ -185,6 +220,42 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
 
     var filenameLabel: String {
         originalFilename ?? "Not Available"
+    }
+}
+
+/// EXIF/TIFF/GPS fields read from a carved image. Metadata sits near the start
+/// of the file, so a truncated carve whose pixels won't render often still has
+/// readable metadata. Every field is optional: absent means the file didn't
+/// carry it, and the row is hidden rather than shown empty.
+struct ImageMetadata: Sendable, Equatable {
+    var pixelSize: String?
+    var captureDate: String?
+    var camera: String?
+    var lens: String?
+    var exposure: String?
+    var coordinate: Coordinate?
+
+    var isEmpty: Bool {
+        pixelSize == nil && captureDate == nil && camera == nil
+            && lens == nil && exposure == nil && coordinate == nil
+    }
+
+    struct Coordinate: Sendable, Equatable {
+        let latitude: Double
+        let longitude: Double
+
+        /// Signed decimal degrees, formatted with the hemisphere spelled out.
+        var label: String {
+            let ns = latitude >= 0 ? "N" : "S"
+            let ew = longitude >= 0 ? "E" : "W"
+            return String(format: "%.5f° %@, %.5f° %@", abs(latitude), ns, abs(longitude), ew)
+        }
+
+        /// Apple Maps pin. ponytail: coordinates only — reverse geocoding to a
+        /// place name needs CLGeocoder and a network round-trip per file.
+        var mapsURL: URL? {
+            URL(string: "https://maps.apple.com/?ll=\(latitude),\(longitude)&q=\(latitude),\(longitude)")
+        }
     }
 }
 

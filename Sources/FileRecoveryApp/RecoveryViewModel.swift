@@ -16,6 +16,7 @@ final class RecoveryViewModel: ObservableObject {
     @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = []
     @Published var previewImage: NSImage?
     @Published var previewPlayer: AVPlayer?
+    @Published var previewMetadata = ImageMetadata()
     @Published var previewFileURL: URL?
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
@@ -53,10 +54,16 @@ final class RecoveryViewModel: ObservableObject {
 
     private var scanTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
+    /// Defers preview work out of NSTableView's selection delegate; separate
+    /// from previewTask, which owns the carve-and-decode itself.
+    private var previewSelectionTask: Task<Void, Never>?
     private var pendingItems: [RecoveredItem] = []
     private var flushScheduled = false
     private var pauseGate: PauseGate?
     private var recoveryLog = RecoveryLog.load()
+    /// Surfaced in the sidebar when recovery history can't be read or written.
+    /// Recovery still works; only the "previously recovered" tracking is lost.
+    @Published var logWarning: String?
     private var currentVolumeID: UInt64 = 0
 
     /// Stable identity for a found file across scans: volume serial (when the
@@ -69,6 +76,10 @@ final class RecoveryViewModel: ObservableObject {
     private let scanner = RecoveryScanner()
 
     init() {
+        // An unreadable history file is surfaced immediately, not on first save:
+        // the user should know tracking is off before they recover anything.
+        logWarning = recoveryLog.loadError
+
         // SwiftUI's Table focus and bare-key shortcuts are both unreliable on
         // macOS; an AppKit event monitor always sees arrow keys.
         // ponytail: monitor lives for the app's lifetime, never removed —
@@ -430,12 +441,23 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func selectItem(_ itemID: RecoveredItem.ID?) {
+        guard itemID != selectedItemID else { return }
         selectedItemID = itemID
-        guard let item = selectedItem else {
-            clearPreview()
-            return
+
+        // Table's selection binding calls this from inside NSTableView's
+        // delegate. Tearing down preview state here publishes more changes, so
+        // SwiftUI re-renders the table mid-delegate and AppKit warns about
+        // reentrancy. The selection itself must land now for the row to
+        // highlight; the preview can wait for the next runloop turn.
+        previewSelectionTask?.cancel()
+        previewSelectionTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
+            guard let item = selectedItem else {
+                clearPreview()
+                return
+            }
+            preparePreview(for: item)
         }
-        preparePreview(for: item)
     }
 
     func isSelectedForRecovery(_ item: RecoveredItem) -> Bool {
@@ -452,8 +474,15 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Selects the visible (filtered) items, so a filename filter can scope
     /// exactly what gets recovered.
+    /// Skips duplicates so one click doesn't queue the same photo several
+    /// times. They stay individually selectable — the flag is a heuristic, so
+    /// nothing is hidden or blocked on its strength.
     func selectAllForRecovery() {
-        selectedRecoveryIDs.formUnion(filteredItems.map(\.id))
+        selectedRecoveryIDs.formUnion(filteredItems.lazy.filter { !$0.isDuplicate }.map(\.id))
+    }
+
+    var duplicateCount: Int {
+        filteredItems.lazy.filter(\.isDuplicate).count
     }
 
     func selectNoneForRecovery() {
@@ -554,7 +583,7 @@ final class RecoveryViewModel: ObservableObject {
             }
         }
         if recordedAny {
-            recoveryLog.save()
+            logWarning = recoveryLog.save()
             if clearZipNameOnSuccess {
                 zipFileName = ""
             }
@@ -566,8 +595,51 @@ final class RecoveryViewModel: ObservableObject {
         previewPlayer?.pause()
         previewPlayer = nil
         previewImage = nil
+        previewMetadata = ImageMetadata()
         previewFileURL = nil
         previewError = nil
+    }
+
+    /// EXIF/TIFF/GPS from the carved bytes. Reads the same temp file the preview
+    /// already writes, so nothing has to be recovered first.
+    nonisolated static func imageMetadata(at url: URL) -> ImageMetadata {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return ImageMetadata()
+        }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+
+        var meta = ImageMetadata()
+
+        if let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int {
+            meta.pixelSize = "\(w) x \(h)"
+        }
+        meta.captureDate = exif[kCGImagePropertyExifDateTimeOriginal] as? String
+        let make = tiff[kCGImagePropertyTIFFMake] as? String
+        let model = tiff[kCGImagePropertyTIFFModel] as? String
+        // Models often already include the make ("Canon EOS R5"); don't repeat it.
+        meta.camera = [make, model].compactMap { $0 }.isEmpty ? nil
+            : (model.map { m in make.map { m.hasPrefix($0) ? m : "\($0) \(m)" } ?? m } ?? make)
+        meta.lens = exif[kCGImagePropertyExifLensModel] as? String
+        if let speed = exif[kCGImagePropertyExifExposureTime] as? Double,
+           let fnum = exif[kCGImagePropertyExifFNumber] as? Double {
+            let shutter = speed >= 1 ? String(format: "%.0fs", speed) : "1/\(Int((1 / speed).rounded()))s"
+            let iso = (exif[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first
+            meta.exposure = "\(shutter) · f/\(String(format: "%.1f", fnum))" + (iso.map { " · ISO \($0)" } ?? "")
+        }
+        // GPS stores unsigned degrees plus a hemisphere reference; apply the sign.
+        if let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
+           let lon = gps[kCGImagePropertyGPSLongitude] as? Double {
+            let latRef = gps[kCGImagePropertyGPSLatitudeRef] as? String ?? "N"
+            let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String ?? "E"
+            meta.coordinate = ImageMetadata.Coordinate(
+                latitude: latRef == "S" ? -lat : lat,
+                longitude: lonRef == "W" ? -lon : lon
+            )
+        }
+        return meta
     }
 
     private func preparePreview(for item: RecoveredItem) {
@@ -598,10 +670,12 @@ final class RecoveryViewModel: ObservableObject {
                 }
 
                 let image = NSImage(contentsOf: outputURL)
+                let metadata = Self.imageMetadata(at: outputURL)
 
                 await MainActor.run {
                     previewFileURL = outputURL
                     previewImage = image
+                    previewMetadata = metadata
                     previewError = image == nil ? "Preview unavailable" : nil
                 }
             } catch is CancellationError {

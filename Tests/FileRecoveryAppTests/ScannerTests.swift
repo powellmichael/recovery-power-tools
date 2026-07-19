@@ -252,3 +252,65 @@ private func be32(_ value: UInt32) -> [UInt8] {
         #expect(map.deletedFiles == [expectedOffset: DeletedFileEntry(name: "photo.jpg", length: 1234)])
     }
 }
+
+@Suite struct DuplicateTests {
+    /// Builds a JPEG whose header bytes are seeded so two files can be made
+    /// identical or distinct on demand.
+    private func jpeg(seed: UInt8, payload: Int = 200) -> [UInt8] {
+        var bytes: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+        bytes += [UInt8](repeating: seed, count: 10)
+        bytes += [0xFF, 0xDA, 0x00, 0x08] + [UInt8](repeating: 0x01, count: 6)
+        bytes += [UInt8](repeating: seed, count: payload)
+        bytes += [0xFF, 0xD9]
+        return bytes
+    }
+
+    private func scan(_ blob: [UInt8]) async throws -> [RecoveredItem] {
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        return try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+    }
+
+    @Test func flagsSecondCopyOfIdenticalFile() async throws {
+        let copy = jpeg(seed: 0x42)
+        var blob = [UInt8](repeating: 0xAA, count: 64)
+        blob += copy
+        blob += [UInt8](repeating: 0xAA, count: 64)
+        blob += copy
+
+        let items = try await scan(blob)
+        #expect(items.count == 2)
+        // First occurrence is the keeper; only the later one is flagged.
+        #expect(items[0].isDuplicate == false)
+        #expect(items[1].isDuplicate == true)
+    }
+
+    @Test func doesNotFlagDistinctFiles() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 64)
+        blob += jpeg(seed: 0x11)
+        blob += [UInt8](repeating: 0xAA, count: 64)
+        blob += jpeg(seed: 0x99)
+
+        let items = try await scan(blob)
+        #expect(items.count == 2)
+        #expect(items.allSatisfy { !$0.isDuplicate })
+    }
+
+    /// Files sharing an identical first 4 KB but differing in total size must
+    /// stay distinct. Payloads exceed the 4 KB prefix on both sides, so only
+    /// the length component of the fingerprint can separate them.
+    @Test func doesNotFlagSamePrefixDifferentLength() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 64)
+        blob += jpeg(seed: 0x55, payload: 5_000)
+        blob += [UInt8](repeating: 0xAA, count: 64)
+        blob += jpeg(seed: 0x55, payload: 6_000)
+
+        let items = try await scan(blob)
+        #expect(items.count == 2)
+        #expect(items.allSatisfy { !$0.isDuplicate })
+    }
+}

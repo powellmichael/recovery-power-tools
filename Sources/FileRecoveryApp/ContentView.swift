@@ -102,6 +102,14 @@ private struct Sidebar: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
+
+                if let warning = viewModel.logWarning {
+                    Label(warning, systemImage: "clock.badge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .help(warning)
+                }
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -327,6 +335,9 @@ private struct ResultsView: View {
                     } label: {
                         Label("Select All", systemImage: "checklist.checked")
                     }
+                    .help(viewModel.duplicateCount > 0
+                          ? "Selects everything except \(viewModel.duplicateCount) duplicate\(viewModel.duplicateCount == 1 ? "" : "s")"
+                          : "Selects every visible result")
 
                     Button {
                         viewModel.selectNoneForRecovery()
@@ -438,6 +449,10 @@ private struct ResultsView: View {
                             } else if item.previouslyRecovered {
                                 Text("Recovered previously")
                                     .foregroundStyle(.orange)
+                            } else if item.isDuplicate {
+                                Text("Duplicate")
+                                    .foregroundStyle(.purple)
+                                    .help("Same first 4 KB and size as an earlier result")
                             } else {
                                 Text("Pending")
                                     .foregroundStyle(.secondary)
@@ -633,6 +648,43 @@ private struct PlayerView: NSViewRepresentable {
     }
 }
 
+/// EXIF rows. Each appears only when the carved file actually carried the field,
+/// since most photos have no GPS and plenty have no lens or exposure data.
+private struct ExifRows: View {
+    let metadata: ImageMetadata
+
+    var body: some View {
+        if let value = metadata.pixelSize {
+            MetadataRow(label: "Dimensions", value: value)
+        }
+        if let value = metadata.captureDate {
+            MetadataRow(label: "Captured", value: value)
+        }
+        if let value = metadata.camera {
+            MetadataRow(label: "Camera", value: value)
+        }
+        if let value = metadata.lens {
+            MetadataRow(label: "Lens", value: value)
+        }
+        if let value = metadata.exposure {
+            MetadataRow(label: "Exposure", value: value)
+        }
+        if let coordinate = metadata.coordinate {
+            GridRow {
+                Text("Location")
+                    .foregroundStyle(.secondary)
+                if let url = coordinate.mapsURL {
+                    Link(coordinate.label, destination: url)
+                        .help("Open in Maps")
+                } else {
+                    Text(coordinate.label)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+}
+
 private struct PreviewPane: View {
     @ObservedObject var viewModel: RecoveryViewModel
 
@@ -661,6 +713,11 @@ private struct PreviewPane: View {
                     MetadataRow(label: "Offset", value: "0x\(String(item.byteOffset, radix: 16).uppercased())")
                     MetadataRow(label: "Source", value: item.source.displayName)
                     MetadataRow(label: "Selected", value: viewModel.isSelectedForRecovery(item) ? "Yes" : "No")
+
+                    if !viewModel.previewMetadata.isEmpty {
+                        Divider()
+                        ExifRows(metadata: viewModel.previewMetadata)
+                    }
                 }
                 .font(.callout)
             } else {

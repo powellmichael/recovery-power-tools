@@ -1,7 +1,21 @@
+import CryptoKit
 import Foundation
+
+/// Tracks fingerprints seen so far in one scan. Reference type so the same set
+/// spans every region; used sequentially from the scan task only.
+private final class DuplicateTracker {
+    private var seen: Set<String> = []
+
+    /// Returns true when this fingerprint was already recorded.
+    func markSeen(_ fingerprint: String?) -> Bool {
+        guard let fingerprint else { return false }
+        return !seen.insert(fingerprint).inserted
+    }
+}
 
 struct RecoveryScanner: Sendable {
     private let chunkSize = 4 * 1024 * 1024
+    private let fingerprintPrefix = 4 * 1024
     private let overlapSize = 128 * 1024
     private let maxCarveSize: UInt64 = 2 * 1024 * 1024 * 1024
     private let jpegSearchCap: UInt64 = 256 * 1024 * 1024
@@ -73,6 +87,7 @@ struct RecoveryScanner: Sendable {
         // Deleted directory entries are first-class results: verify the
         // signature at each entry's data offset and emit it with its original
         // name and exact size. Carving then only adds anonymous extras.
+        let tracker = DuplicateTracker()
         var claimed: [RecoveredItem] = []
         if let source = plan.regions.first?.source, !plan.deletedFiles.isEmpty {
             let freeRanges = plan.regions.map(\.range).sorted { $0.lowerBound < $1.lowerBound }
@@ -84,7 +99,7 @@ struct RecoveryScanner: Sendable {
                 let head = [UInt8](try source.read(at: offset, count: 64))
                 guard let (kind, sniffExt) = sniffKind(head), selectedKinds.contains(kind) else { continue }
                 let nameExt = (entry.name as NSString).pathExtension.lowercased()
-                let item = RecoveredItem(
+                var item = RecoveredItem(
                     kind: kind,
                     source: source,
                     byteOffset: offset,
@@ -93,6 +108,7 @@ struct RecoveryScanner: Sendable {
                     originalFilename: entry.name,
                     segments: entry.segments
                 )
+                item.isDuplicate = tracker.markSeen(fingerprint(for: item))
                 claimed.append(item)
                 allItems.append(item)
                 await itemFound(item)
@@ -111,6 +127,7 @@ struct RecoveryScanner: Sendable {
                 selectedKinds: selectedKinds,
                 deletedFiles: plan.deletedFiles,
                 claimed: regionClaims,
+                tracker: tracker,
                 pauseGate: pauseGate,
                 progress: progress,
                 itemFound: itemFound
@@ -130,6 +147,7 @@ struct RecoveryScanner: Sendable {
         selectedKinds: Set<MediaKind>,
         deletedFiles: [UInt64: DeletedFileEntry],
         claimed: [RecoveredItem],
+        tracker: DuplicateTracker,
         pauseGate: PauseGate?,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
         itemFound: @escaping @Sendable (RecoveredItem) async -> Void
@@ -163,6 +181,8 @@ struct RecoveryScanner: Sendable {
             ) {
                 guard !overlapsExisting(candidate, in: items),
                       !overlapsExisting(candidate, in: claimed) else { continue }
+                var candidate = candidate
+                candidate.isDuplicate = tracker.markSeen(fingerprint(for: candidate))
                 items.append(candidate)
                 await itemFound(candidate)
             }
@@ -183,6 +203,32 @@ struct RecoveryScanner: Sendable {
         }
 
         return items.sorted { $0.byteOffset < $1.byteOffset }
+    }
+
+    /// Hash of the file's first 4 KB plus its exact length. Two results
+    /// matching on both are the same content in every practical case: image
+    /// headers carry EXIF timestamps, serial numbers and thumbnail data, so
+    /// distinct photos don't collide on prefix and byte count together.
+    /// ponytail: prefix only — hashing full contents would double scan I/O.
+    /// Raise fingerprintPrefix, or hash to byteLength, if certainty matters more.
+    private func fingerprint(source: ScanSource, offset: UInt64, length: UInt64) -> String? {
+        let want = Int(min(UInt64(fingerprintPrefix), length))
+        guard want > 0, let head = try? source.read(at: offset, count: want), !head.isEmpty else {
+            return nil
+        }
+        var hasher = SHA256()
+        hasher.update(data: head)
+        withUnsafeBytes(of: length.littleEndian) { hasher.update(bufferPointer: $0) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Fragmented files start at their first data run, not byteOffset.
+    private func fingerprint(for item: RecoveredItem) -> String? {
+        fingerprint(
+            source: item.source,
+            offset: item.segments?.first?.lowerBound ?? item.byteOffset,
+            length: item.byteLength
+        )
     }
 
     /// Blocks while the gate is paused; pause latency is at most one chunk
