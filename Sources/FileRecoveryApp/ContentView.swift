@@ -70,168 +70,177 @@ private struct Sidebar: View {
     @ObservedObject var viewModel: RecoveryViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Source")
-                    .font(.headline)
-                PathRow(label: viewModel.sourceLabel, placeholder: "No source selected")
-                Menu {
-                    if viewModel.externalDevices.isEmpty {
-                        Text("No external drives found")
-                    }
-                    ForEach(viewModel.externalDevices) { device in
-                        Button(device.displayName) {
-                            viewModel.chooseDevice(device)
+        // The controls scroll; expanding a media category grows the content
+        // rather than pushing the top of the sidebar out of view. Status stays
+        // pinned to the bottom so scan progress is visible while scrolled.
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Source")
+                            .font(.headline)
+                        PathRow(label: viewModel.sourceLabel, placeholder: "No source selected")
+                        Menu {
+                            if viewModel.externalDevices.isEmpty {
+                                Text("No external drives found")
+                            }
+                            ForEach(viewModel.externalDevices) { device in
+                                Button(device.displayName) {
+                                    viewModel.chooseDevice(device)
+                                }
+                            }
+                            Divider()
+                            Button("Refresh") {
+                                viewModel.refreshDevices()
+                            }
+                        } label: {
+                            Label("Choose Drive", systemImage: "externaldrive")
+                        }
+                        Button {
+                            viewModel.chooseSource()
+                        } label: {
+                            Label("Choose File / Folder", systemImage: "folder.badge.gearshape")
+                        }
+
+                        if let warning = viewModel.sourceWarning {
+                            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+
+                        if let warning = viewModel.logWarning {
+                            Label(warning, systemImage: "clock.badge.exclamationmark")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                                .help(warning)
                         }
                     }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Destination")
+                            .font(.headline)
+                        PathRow(label: viewModel.destinationURL?.lastPathComponent, placeholder: "No destination selected")
+                        Button {
+                            viewModel.chooseDestination()
+                        } label: {
+                            Label("Choose Folder", systemImage: "folder")
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Media")
+                            .font(.headline)
+                        MediaFilterList(viewModel: viewModel)
+                    }
+
                     Divider()
-                    Button("Refresh") {
-                        viewModel.refreshDevices()
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Save as ZIP", isOn: Binding(
+                            get: { viewModel.saveAsZip },
+                            set: { viewModel.saveAsZip = $0 }
+                        ))
+
+                        if viewModel.saveAsZip {
+                            TextField("ZIP name (optional)", text: Binding(
+                                get: { viewModel.zipFileName },
+                                set: { viewModel.zipFileName = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                        }
+
+                        Button {
+                            viewModel.scanButtonPressed()
+                        } label: {
+                            Label("Scan", systemImage: "magnifyingglass")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!viewModel.canScan)
+                        .confirmationDialog(
+                            "A filename filter is active",
+                            isPresented: Binding(
+                                get: { viewModel.showClearFilterPrompt },
+                                set: { viewModel.showClearFilterPrompt = $0 }
+                            )
+                        ) {
+                            Button("Clear filter and scan") { viewModel.confirmScan(clearFilter: true) }
+                            Button("Keep filter and scan") { viewModel.confirmScan(clearFilter: false) }
+                            Button("Cancel", role: .cancel) { viewModel.showClearFilterPrompt = false }
+                        } message: {
+                            Text("“\(viewModel.filenameFilter)” will hide results that don't match. Clear it to see everything the scan finds.")
+                        }
+
+                        Button {
+                            viewModel.recoverSelected()
+                        } label: {
+                            Label("Recover", systemImage: "arrow.down.doc")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(!viewModel.canRecover)
+
+                        if viewModel.isScanActive {
+                            Button {
+                                viewModel.togglePause()
+                            } label: {
+                                Label(
+                                    viewModel.state == .paused ? "Resume" : "Pause",
+                                    systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+
+                            Button {
+                                viewModel.cancelScan()
+                            } label: {
+                                Label("Cancel", systemImage: "xmark.circle")
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
                     }
-                } label: {
-                    Label("Choose Drive", systemImage: "externaldrive")
-                }
-                Button {
-                    viewModel.chooseSource()
-                } label: {
-                    Label("Choose File / Folder", systemImage: "folder.badge.gearshape")
-                }
 
-                if let warning = viewModel.sourceWarning {
-                    Label(warning, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
+                    Divider()
 
-                if let warning = viewModel.logWarning {
-                    Label(warning, systemImage: "clock.badge.exclamationmark")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                        .help(warning)
-                }
-            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("File List")
+                            .font(.headline)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Destination")
-                    .font(.headline)
-                PathRow(label: viewModel.destinationURL?.lastPathComponent, placeholder: "No destination selected")
-                Button {
-                    viewModel.chooseDestination()
-                } label: {
-                    Label("Choose Folder", systemImage: "folder")
-                }
-            }
+                        Button {
+                            viewModel.exportManifest()
+                        } label: {
+                            Label("Export…", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(viewModel.items.isEmpty)
+                        .help("Save these results so they can be recovered later without re-scanning")
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Media")
-                    .font(.headline)
-                MediaFilterList(viewModel: viewModel)
+                        Button {
+                            viewModel.importManifest()
+                        } label: {
+                            Label("Import…", systemImage: "square.and.arrow.down")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(viewModel.target == nil || viewModel.isScanActive)
+                        .help("Open a saved list and check it against the selected drive")
+
+                        if let status = viewModel.manifestStatus {
+                            Text(status)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Divider()
-
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle("Save as ZIP", isOn: Binding(
-                    get: { viewModel.saveAsZip },
-                    set: { viewModel.saveAsZip = $0 }
-                ))
-
-                if viewModel.saveAsZip {
-                    TextField("ZIP name (optional)", text: Binding(
-                        get: { viewModel.zipFileName },
-                        set: { viewModel.zipFileName = $0 }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                }
-
-                Button {
-                    viewModel.scanButtonPressed()
-                } label: {
-                    Label("Scan", systemImage: "magnifyingglass")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!viewModel.canScan)
-                .confirmationDialog(
-                    "A filename filter is active",
-                    isPresented: Binding(
-                        get: { viewModel.showClearFilterPrompt },
-                        set: { viewModel.showClearFilterPrompt = $0 }
-                    )
-                ) {
-                    Button("Clear filter and scan") { viewModel.confirmScan(clearFilter: true) }
-                    Button("Keep filter and scan") { viewModel.confirmScan(clearFilter: false) }
-                    Button("Cancel", role: .cancel) { viewModel.showClearFilterPrompt = false }
-                } message: {
-                    Text("“\(viewModel.filenameFilter)” will hide results that don't match. Clear it to see everything the scan finds.")
-                }
-
-                Button {
-                    viewModel.recoverSelected()
-                } label: {
-                    Label("Recover", systemImage: "arrow.down.doc")
-                        .frame(maxWidth: .infinity)
-                }
-                .disabled(!viewModel.canRecover)
-
-                if viewModel.isScanActive {
-                    Button {
-                        viewModel.togglePause()
-                    } label: {
-                        Label(
-                            viewModel.state == .paused ? "Resume" : "Pause",
-                            systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
-                        )
-                        .frame(maxWidth: .infinity)
-                    }
-
-                    Button {
-                        viewModel.cancelScan()
-                    } label: {
-                        Label("Cancel", systemImage: "xmark.circle")
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("File List")
-                    .font(.headline)
-
-                Button {
-                    viewModel.exportManifest()
-                } label: {
-                    Label("Export…", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity)
-                }
-                .disabled(viewModel.items.isEmpty)
-                .help("Save these results so they can be recovered later without re-scanning")
-
-                Button {
-                    viewModel.importManifest()
-                } label: {
-                    Label("Import…", systemImage: "square.and.arrow.down")
-                        .frame(maxWidth: .infinity)
-                }
-                .disabled(viewModel.target == nil || viewModel.isScanActive)
-                .help("Open a saved list and check it against the selected drive")
-
-                if let status = viewModel.manifestStatus {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Spacer()
 
             StatusBlock(viewModel: viewModel)
+                .padding(20)
         }
-        .padding(20)
         .onAppear {
             viewModel.refreshDevices()
         }
@@ -434,8 +443,8 @@ private struct ResultsView: View {
 
     private var resultsTable: some View {
         Table(viewModel.filteredItems, selection: Binding(
-                        get: { viewModel.selectedItemID },
-                        set: { viewModel.selectItem($0) }
+                        get: { viewModel.tableSelection },
+                        set: { viewModel.setTableSelection($0) }
                     ), sortOrder: Binding(
                         get: { viewModel.sortOrder },
                         set: { viewModel.sortOrder = $0 }
@@ -443,7 +452,7 @@ private struct ResultsView: View {
                         TableColumn("") { item in
                             Toggle("", isOn: Binding(
                                 get: { viewModel.isSelectedForRecovery(item) },
-                                set: { viewModel.setSelectedForRecovery(item, isSelected: $0) }
+                                set: { viewModel.setSelectedForRecoveryRespectingSelection(item, isSelected: $0) }
                             ))
                             .labelsHidden()
                         }
@@ -522,6 +531,19 @@ private struct ResultsView: View {
                             .help("Show or hide details")
                         }
                         .width(48)
+        }
+        .contextMenu(forSelectionType: RecoveredItem.ID.self) { ids in
+            if !ids.isEmpty {
+                let count = viewModel.recoverableCount(in: ids)
+                Button("Mark \(count) for Recovery") {
+                    viewModel.setSelectedForRecovery(ids: ids, isSelected: true)
+                }
+                .disabled(count == 0)
+
+                Button("Remove \(ids.count) from Recovery") {
+                    viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
+                }
+            }
         }
     }
 
@@ -603,13 +625,23 @@ private struct GalleryCell: View {
     @ObservedObject var viewModel: RecoveryViewModel
     let item: RecoveredItem
 
-    private var isSelected: Bool { viewModel.selectedItemID == item.id }
+    private var isSelected: Bool { viewModel.tableSelection.contains(item.id) }
 
     var body: some View {
         VStack(spacing: 8) {
             ZStack(alignment: .topLeading) {
                 Button {
-                    viewModel.toggleDetails(for: item)
+                    // Modifiers are read at click time: SwiftUI buttons don't
+                    // report them, and a plain click must keep toggling the
+                    // preview pane as it always has.
+                    let flags = NSEvent.modifierFlags
+                    if flags.contains(.shift) {
+                        viewModel.extendSelection(to: item)
+                    } else if flags.contains(.command) {
+                        viewModel.toggleSelection(item)
+                    } else {
+                        viewModel.toggleDetails(for: item)
+                    }
                 } label: {
                     thumbnail
                         .frame(maxWidth: .infinity)
@@ -617,11 +649,11 @@ private struct GalleryCell: View {
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
-                .help("Show or hide preview and details")
+                .help("Click to show or hide details. Shift-click to select a range, Command-click to add one.")
 
                 Toggle("", isOn: Binding(
                     get: { viewModel.isSelectedForRecovery(item) },
-                    set: { viewModel.setSelectedForRecovery(item, isSelected: $0) }
+                    set: { viewModel.setSelectedForRecoveryRespectingSelection(item, isSelected: $0) }
                 ))
                 .labelsHidden()
                 .padding(6)
@@ -654,6 +686,19 @@ private struct GalleryCell: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+        }
+        .contextMenu {
+            // A right-click on an unselected cell acts on that cell alone.
+            let ids = viewModel.tableSelection.contains(item.id) ? viewModel.tableSelection : [item.id]
+            let count = viewModel.recoverableCount(in: ids)
+            Button("Mark \(count) for Recovery") {
+                viewModel.setSelectedForRecovery(ids: ids, isSelected: true)
+            }
+            .disabled(count == 0)
+
+            Button("Remove \(ids.count) from Recovery") {
+                viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
+            }
         }
     }
 

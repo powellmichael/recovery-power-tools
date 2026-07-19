@@ -14,6 +14,11 @@ final class RecoveryViewModel: ObservableObject {
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
     @Published var selectedItemID: RecoveredItem.ID?
+    /// Highlighted rows. Shift- and command-click build this set; the preview
+    /// pane follows it only when exactly one row is selected.
+    @Published var tableSelection: Set<RecoveredItem.ID> = []
+    /// Where a shift-click range starts. Set by a plain or command click.
+    private var selectionAnchorID: RecoveredItem.ID?
     @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = []
     @Published var previewImage: NSImage?
     @Published var previewPlayer: AVPlayer?
@@ -173,6 +178,7 @@ final class RecoveryViewModel: ObservableObject {
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
+        tableSelection = []
         clearPreview()
         progress = ScanProgress()
         scanNote = nil
@@ -291,6 +297,7 @@ final class RecoveryViewModel: ObservableObject {
         }
         selectedRecoveryIDs = []
         selectedItemID = nil
+        tableSelection = []
         clearThumbnails()
 
         let stale = staleReasons.count
@@ -360,6 +367,7 @@ final class RecoveryViewModel: ObservableObject {
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
+        tableSelection = []
         clearPreview()
         progress = ScanProgress()
         scanNote = nil
@@ -557,9 +565,79 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    /// Table selection binding. A single row previews; several rows leave the
+    /// preview alone, since there's no one file to show.
+    func setTableSelection(_ ids: Set<RecoveredItem.ID>) {
+        tableSelection = ids
+        if ids.count == 1, let only = ids.first {
+            selectItem(only)
+        } else if ids.isEmpty {
+            selectItem(nil)
+        }
+    }
+
+    /// Applies a recovery checkbox to every highlighted row when the clicked
+    /// row is part of a multi-row selection, so shift-selecting a range and
+    /// ticking one box marks the whole range.
+    func setSelectedForRecoveryRespectingSelection(_ item: RecoveredItem, isSelected: Bool) {
+        guard tableSelection.count > 1, tableSelection.contains(item.id) else {
+            setSelectedForRecovery(item, isSelected: isSelected)
+            return
+        }
+        for id in tableSelection {
+            guard let match = items.first(where: { $0.id == id }) else { continue }
+            setSelectedForRecovery(match, isSelected: isSelected)
+        }
+    }
+
+    /// Command-click: add or remove one item without disturbing the rest.
+    func toggleSelection(_ item: RecoveredItem) {
+        if tableSelection.contains(item.id) {
+            tableSelection.remove(item.id)
+            if selectedItemID == item.id { selectedItemID = tableSelection.count == 1 ? tableSelection.first : nil }
+        } else {
+            tableSelection.insert(item.id)
+            selectionAnchorID = item.id
+        }
+    }
+
+    /// Shift-click: select everything between the anchor and this item in the
+    /// order currently shown, so the range matches what the user sees rather
+    /// than the underlying scan order.
+    func extendSelection(to item: RecoveredItem) {
+        let visible = filteredItems
+        guard let end = visible.firstIndex(where: { $0.id == item.id }) else { return }
+        let anchor = selectionAnchorID ?? selectedItemID
+        guard let anchor, let start = visible.firstIndex(where: { $0.id == anchor }) else {
+            setTableSelection([item.id])
+            selectionAnchorID = item.id
+            return
+        }
+        let range = start <= end ? start...end : end...start
+        tableSelection = Set(visible[range].map(\.id))
+    }
+
+    /// Context-menu action over whatever rows are highlighted.
+    func setSelectedForRecovery(ids: Set<RecoveredItem.ID>, isSelected: Bool) {
+        for id in ids {
+            guard let match = items.first(where: { $0.id == id }) else { continue }
+            setSelectedForRecovery(match, isSelected: isSelected)
+        }
+    }
+
+    /// How many of the highlighted rows can actually be recovered — stale
+    /// manifest entries can't, so a menu title of "Mark 40" would be a lie.
+    func recoverableCount(in ids: Set<RecoveredItem.ID>) -> Int {
+        ids.filter { staleReasons[$0] == nil }.count
+    }
+
     func selectItem(_ itemID: RecoveredItem.ID?) {
         guard itemID != selectedItemID else { return }
         selectedItemID = itemID
+        // Keep the highlight in step when selection comes from elsewhere
+        // (arrow keys, the Preview column, gallery clicks).
+        if let itemID { tableSelection = [itemID] } else { tableSelection = [] }
+        selectionAnchorID = itemID
 
         // Table's selection binding calls this from inside NSTableView's
         // delegate. Tearing down preview state here publishes more changes, so
