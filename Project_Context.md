@@ -25,6 +25,8 @@ Phase 5 commits (on branch, not yet merged):
   NSTableView reentrancy fix
 - `b76ae2d` file list export/import with drive verification
 - `dbf152a` percent complete while scanning
+- `d787a23` project context updated through phase 5
+- `e656892` multi-selection in list and gallery
 
 ## Architecture
 
@@ -89,6 +91,13 @@ of JPEGs with damaged headers and a strict parser would recover fewer files.
 - Three-way visibility: All / New / Recovered.
 - Media types grouped into collapsible Images / Video / Archives categories;
   JPEG only by default.
+- Multi-selection in both views: shift-click for a range, command-click for
+  discontiguous picks. Ticking one checkbox inside a multi-row selection
+  applies to the whole selection; a checkbox outside it affects only its own
+  row. Right-click offers the same, with a mark count that excludes stale
+  manifest entries. Shift ranges follow visible order, so a range under an
+  active filter never sweeps in rows that aren't on screen. Selection is
+  shared, so it survives switching between list and gallery.
 
 **Preview**
 
@@ -138,7 +147,7 @@ so tests never touch the real file.
 
 ## Tests
 
-`swift test` — 33 tests across six files:
+`swift test` — 41 tests across six files:
 
 - `ScannerTests` — synthetic blob carving (JPEG, PNG, BMP, ZIP, MP4
   offsets/lengths), recovery byte fidelity, EXIF-thumbnail truncation,
@@ -151,9 +160,19 @@ so tests never touch the real file.
   of overwritten data / volume mismatch / offsets past end of device, version
   rejection.
 - `RecoveryLogTests` — round-trip, corrupt file blocks save and preserves
-  bytes, existing array format still reads.
+  bytes, existing array format still reads. Also holds `MultiSelectionTests`:
+  checkbox-applies-to-selection, shift ranges in both directions, ranges
+  respecting an active filter, command-click toggling.
 - `MetadataTests` — EXIF GPS hemisphere signs, camera make/model dedup,
   absent-field handling, progress labels.
+
+## Open UI Issues
+
+- **Sidebar shifts when a Media category expands.** Opening Images pushes the
+  content above it upward instead of growing downward or scrolling. Reported
+  2026-07-19, not yet fixed. The sidebar `VStack` needs a `ScrollView` with a
+  top-anchored layout so expanding a `DisclosureGroup` doesn't reflow
+  everything above it.
 
 ## Known Limitations / Deliberate Deferrals
 
@@ -187,18 +206,56 @@ so tests never touch the real file.
 - Thumbnail cache is unbounded (no LRU eviction).
 - Not sandboxed/signed; SwiftPM executable, not an Xcode project yet.
 
+## Future Enhancements
+
+### Landing page (design in progress)
+
+A launch screen replacing the current straight-to-scan layout: a category
+sidebar (Hard Drives and Locations, SD Card Recovery, plus utility entries)
+next to a grid of drive cards showing name, capacity bar and used/total size.
+Design still being worked out; estimate below assumes the drive grid plus the
+two recovery categories, not the utility tools.
+
+Effort: roughly 1.5 days for the drive grid, sidebar shell, and routing into
+the existing scan flow. `DeviceDiscovery.externalDevices()` already supplies
+everything the cards need except capacity. The restructure is the real work —
+`ContentView` has no landing route today, so it becomes a `NavigationSplitView`
+where the scan controls stay reachable after a drive is chosen.
+
+Two things to settle before building:
+
+- **Capacity is only readable for mounted volumes** (`volumeAvailableCapacityKey`
+  via `URL.resourceValues`, no prompt, needs a mount point added to
+  `ExternalDevice`). An unmounted volume's used space can only come from
+  parsing its filesystem off the raw device, which means one `authopen`
+  password prompt per drive — a non-starter for a launch screen. Unmounted
+  drives should read "Not mounted", never "0 bytes": a recovery tool claiming a
+  drive is empty when it can't see inside is the wrong kind of wrong.
+- **File Repair, iCloud and Other Tools are products, not screens.** Nothing
+  behind them exists. Leave them out of the first pass rather than shipping
+  dead entries — in a tool people reach for after losing data, a dead-end
+  button is worse than an absent one.
+
+SD Card Recovery is thin by comparison (~2 hours): the same scan flow filtered
+to SD/removable devices, which `diskutil` reports via `BusProtocol`.
+
 ## Recommended Next Steps
 
-1. **Field-test phase 5** on the NTFS drive: video playback, gallery video
+1. **Fix the sidebar layout shift** when a Media category expands (see Open UI
+   Issues) — small, and it's in the way every time the app is used.
+2. **Field-test phase 5** on the NTFS drive: video playback, gallery video
    thumbnails, EXIF/GPS on real photos, manifest export → replug → import to
    see how many entries survive a mount. That last number decides whether scan
    resume is worth building.
-2. **FAT32 deleted directory entries** for original filenames — the last
+3. **Landing page** once the design settles (see Future Enhancements).
+4. **FAT32 deleted directory entries** for original filenames — the last
    filesystem still showing "Not Available". Worth it only if FAT32 volumes
-   (SD cards, older USB sticks) are actually in scope.
-3. **Scan resume** via a cursor in the manifest, if field testing shows
+   (SD cards, older USB sticks) are actually in scope. Note this pairs with the
+   landing page's SD Card Recovery category: SD cards are typically FAT32, so
+   that category is thin without this parser.
+5. **Scan resume** via a cursor in the manifest, if field testing shows
    manifests survive real-world use.
-4. App icon, signing, Xcode project — only when distribution matters.
+6. App icon, signing, Xcode project — only when distribution matters.
 
 ## Environment Notes
 
