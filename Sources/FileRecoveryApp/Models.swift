@@ -236,6 +236,11 @@ struct RecoveryLog {
         keys.contains(key)
     }
 
+    /// How many recorded recoveries belong to a volume, e.g. prefix "v123:".
+    func count(withPrefix prefix: String) -> Int {
+        keys.count { $0.hasPrefix(prefix) }
+    }
+
     mutating func record(_ key: String) {
         keys.insert(key)
     }

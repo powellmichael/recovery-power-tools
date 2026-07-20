@@ -474,6 +474,14 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Found items are NOT auto-selected for recovery: the user picks
     /// explicitly (or uses Select All on a filtered list).
+    /// Everything ever recovered from the current volume, whatever media type.
+    /// The Recovered chip shows it so an off-type scan reads as "0 of 2,248
+    /// in this scan" rather than looking like lost history.
+    var volumeHistoryCount: Int {
+        guard currentVolumeID != 0 else { return 0 }
+        return recoveryLog.count(withPrefix: "v\(currentVolumeID):")
+    }
+
     /// Test hook: records items as recovered exactly the way a real recovery
     /// does — same key scheme, same save path.
     func recordRecoveredForTesting(_ ids: Set<RecoveredItem.ID>) {

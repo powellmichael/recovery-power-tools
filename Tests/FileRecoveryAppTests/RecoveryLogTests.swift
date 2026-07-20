@@ -72,6 +72,21 @@ private func tempLogURL() -> URL {
         #expect(final.contains("v1:new:entry"))
     }
 
+    @Test func countsKeysByVolumePrefix() throws {
+        let url = tempLogURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var log = RecoveryLog.load(from: url)
+        log.record("v111:1:1")
+        log.record("v111:2:2")
+        log.record("v222:3:3")
+
+        #expect(log.count(withPrefix: "v111:") == 2)
+        #expect(log.count(withPrefix: "v222:") == 1)
+        // "v1:" must not match "v111:..." keys — the colon is the boundary.
+        #expect(log.count(withPrefix: "v1:") == 0)
+    }
+
     /// The real log format is a JSON array of strings; decoding must keep
     /// working against a file written by the previous version.
     @Test func readsExistingArrayFormat() throws {

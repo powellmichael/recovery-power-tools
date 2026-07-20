@@ -484,7 +484,14 @@ private struct ResultsView: View {
                 HStack(spacing: 10) {
                     StatChip(label: "Found", value: "\(viewModel.items.count)", detail: filteredDetail)
                     StatChip(label: "Selected", value: "\(viewModel.selectedRecoveryIDs.count)", detail: selectedSize)
-                    StatChip(label: "Recovered", value: "\(recoveredCount)", tint: recoveredCount > 0 ? .green : nil)
+                    StatChip(
+                        label: "Recovered",
+                        value: "\(recoveredCount)",
+                        detail: viewModel.volumeHistoryCount > 0
+                            ? "of \(viewModel.volumeHistoryCount) ever on this drive"
+                            : nil,
+                        tint: recoveredCount > 0 ? .green : nil
+                    )
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
