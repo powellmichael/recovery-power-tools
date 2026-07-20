@@ -503,6 +503,10 @@ private struct ResultsView: View {
 
             if viewModel.items.isEmpty {
                 EmptyResultsView()
+            } else if viewModel.filteredItems.isEmpty {
+                // Results exist but the current view shows none — say why,
+                // because an unexplained empty list reads as lost data.
+                EmptyFilterExplanation(visibility: viewModel.recoveredVisibility)
             } else {
                 HSplitView {
                     Group {
@@ -1111,6 +1115,52 @@ private struct MetadataRow: View {
                 .truncationMode(.middle)
                 .textSelection(.enabled)
         }
+    }
+}
+
+/// Shown when the scan found items but the active visibility filter hides all
+/// of them. The Recovered case matters most: recovered files reappear only
+/// when a scan re-finds them, which depends on the media types selected — an
+/// Images-only scan will never re-find recovered videos.
+private struct EmptyFilterExplanation: View {
+    let visibility: RecoveredVisibility
+
+    private var message: (icon: String, title: String, detail: String) {
+        switch visibility {
+        case .all:
+            ("line.3.horizontal.decrease.circle", "No results match",
+             "The filename filter hides every result.")
+        case .unrecovered:
+            ("checkmark.circle", "Nothing new here",
+             "Every result is recovered, skipped, or marked as recovered elsewhere.")
+        case .marked:
+            ("checklist.unchecked", "Nothing marked for recovery",
+             "Tick files to queue them, then review the queue here before recovering.")
+        case .recovered:
+            ("clock.arrow.circlepath", "No recovered files in this scan",
+             "Recovered files appear here only when a scan finds them again — "
+             + "and a scan only looks for the media types selected in the sidebar. "
+             + "Files recovered under other types (for example videos, during an "
+             + "images-only scan) stay in the history and reappear when their "
+             + "types are selected.")
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: message.icon)
+                .font(.system(size: 44))
+                .foregroundStyle(.secondary)
+            Text(message.title)
+                .font(.title3.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(message.detail)
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

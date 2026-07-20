@@ -76,8 +76,8 @@ final class RecoveryViewModel: ObservableObject {
     private var pendingItems: [RecoveredItem] = []
     private var flushScheduled = false
     private var pauseGate: PauseGate?
-    private var recoveryLog = RecoveryLog.load()
-    private var reviewLog = ReviewLog.load()
+    private var recoveryLog: RecoveryLog
+    private var reviewLog: ReviewLog
     @Published var manifestStatus: String?
     /// Manifest entries whose data no longer matches the drive.
     @Published private(set) var staleReasons: [RecoveredItem.ID: RecoveryManifest.Staleness] = [:]
@@ -95,7 +95,14 @@ final class RecoveryViewModel: ObservableObject {
     }
     private let scanner = RecoveryScanner()
 
-    init() {
+    init(
+        recoveryLogURL: URL = RecoveryLog.defaultURL,
+        reviewLogURL: URL = ReviewLog.defaultURL
+    ) {
+        // Injectable so tests can run the full scan-recover-rescan pipeline
+        // without touching the real history files.
+        recoveryLog = RecoveryLog.load(from: recoveryLogURL)
+        reviewLog = ReviewLog.load(from: reviewLogURL)
         // An unreadable history file is surfaced immediately, not on first save:
         // the user should know tracking is off before they recover anything.
         logWarning = recoveryLog.loadError
@@ -467,6 +474,25 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Found items are NOT auto-selected for recovery: the user picks
     /// explicitly (or uses Select All on a filtered list).
+    /// Test hook: records items as recovered exactly the way a real recovery
+    /// does — same key scheme, same save path.
+    func recordRecoveredForTesting(_ ids: Set<RecoveredItem.ID>) {
+        for index in items.indices where ids.contains(items[index].id) {
+            recoveryLog.record(logKey(for: items[index]))
+        }
+        recoveryLog.save()
+    }
+
+    /// Test hook: what the scan pipeline stamps onto each found item.
+    func stampForTesting(_ item: RecoveredItem) -> RecoveredItem {
+        markedIfPreviouslyRecovered(item)
+    }
+
+    /// Test hook: the volume component of history keys.
+    func setVolumeIDForTesting(_ id: UInt64) {
+        currentVolumeID = id
+    }
+
     private func markedIfPreviouslyRecovered(_ item: RecoveredItem) -> RecoveredItem {
         var item = item
         let key = logKey(for: item)
