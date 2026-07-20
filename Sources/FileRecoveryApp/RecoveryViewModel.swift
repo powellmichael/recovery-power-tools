@@ -45,9 +45,19 @@ final class RecoveryViewModel: ObservableObject {
         case .all:
             break
         case .unrecovered:
-            visible = visible.filter { !$0.previouslyRecovered && $0.recoveredURL == nil }
+            // "New" means still needing a decision: not recovered by the app,
+            // not marked skipped or recovered-elsewhere.
+            visible = visible.filter {
+                !$0.previouslyRecovered && $0.recoveredURL == nil && $0.reviewMark == nil
+            }
+        case .marked:
+            visible = visible.filter { selectedRecoveryIDs.contains($0.id) }
         case .recovered:
-            visible = visible.filter { $0.previouslyRecovered || $0.recoveredURL != nil }
+            // Recovered-elsewhere counts: from the user's point of view the
+            // file is recovered, just not by this tool.
+            visible = visible.filter {
+                $0.previouslyRecovered || $0.recoveredURL != nil || $0.reviewMark == .recoveredElsewhere
+            }
         }
         if !filenameFilter.isEmpty {
             visible = visible.filter { $0.displayName.localizedCaseInsensitiveContains(filenameFilter) }
@@ -67,6 +77,7 @@ final class RecoveryViewModel: ObservableObject {
     private var flushScheduled = false
     private var pauseGate: PauseGate?
     private var recoveryLog = RecoveryLog.load()
+    private var reviewLog = ReviewLog.load()
     @Published var manifestStatus: String?
     /// Manifest entries whose data no longer matches the drive.
     @Published private(set) var staleReasons: [RecoveredItem.ID: RecoveryManifest.Staleness] = [:]
@@ -458,8 +469,29 @@ final class RecoveryViewModel: ObservableObject {
     /// explicitly (or uses Select All on a filtered list).
     private func markedIfPreviouslyRecovered(_ item: RecoveredItem) -> RecoveredItem {
         var item = item
-        item.previouslyRecovered = recoveryLog.contains(logKey(for: item))
+        let key = logKey(for: item)
+        item.previouslyRecovered = recoveryLog.contains(key)
+        item.reviewMark = reviewLog.mark(for: key)
         return item
+    }
+
+    /// Applies or clears a durable review mark on the given items and persists
+    /// it, so the judgement survives a rescan of the same volume.
+    func setReviewMark(_ mark: ReviewMark?, ids: Set<RecoveredItem.ID>) {
+        for index in items.indices where ids.contains(items[index].id) {
+            items[index].reviewMark = mark
+            reviewLog.set(mark, for: logKey(for: items[index]))
+            // A skipped file shouldn't stay queued for recovery.
+            if mark != nil {
+                selectedRecoveryIDs.remove(items[index].id)
+            }
+        }
+        logWarning = reviewLog.save()
+    }
+
+    /// How many of the given items carry this mark — drives menu titles.
+    func markCount(_ mark: ReviewMark, in ids: Set<RecoveredItem.ID>) -> Int {
+        items.count { ids.contains($0.id) && $0.reviewMark == mark }
     }
 
     private func flushPendingItems() {
@@ -678,7 +710,7 @@ final class RecoveryViewModel: ObservableObject {
     func selectAllForRecovery() {
         selectedRecoveryIDs.formUnion(
             filteredItems.lazy
-                .filter { !$0.isDuplicate && self.staleReasons[$0.id] == nil }
+                .filter { !$0.isDuplicate && $0.reviewMark == nil && self.staleReasons[$0.id] == nil }
                 .map(\.id)
         )
     }

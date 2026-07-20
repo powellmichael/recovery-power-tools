@@ -389,6 +389,33 @@ private struct StatusBlock: View {
     }
 }
 
+/// Context-menu section for durable review marks, shared by table and gallery.
+/// Skipping removes items from the recovery queue; both marks survive rescans.
+private struct ReviewMarkMenuItems: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+    let ids: Set<RecoveredItem.ID>
+
+    var body: some View {
+        Divider()
+
+        Button("Skip — Don't Recover") {
+            viewModel.setReviewMark(.skipped, ids: ids)
+        }
+        .help("Hide from New; kept out of Select All. Remembered for this drive.")
+
+        Button("Mark as Recovered Elsewhere") {
+            viewModel.setReviewMark(.recoveredElsewhere, ids: ids)
+        }
+        .help("You already have this file from another source. Shows under Recovered.")
+
+        if viewModel.markCount(.skipped, in: ids) > 0 || viewModel.markCount(.recoveredElsewhere, in: ids) > 0 {
+            Button("Clear Skip / Elsewhere Marks") {
+                viewModel.setReviewMark(nil, ids: ids)
+            }
+        }
+    }
+}
+
 /// Small tinted capsule for statuses, replacing bare colored text.
 private struct StatusBadge: View {
     let text: String
@@ -660,6 +687,12 @@ private struct ResultsView: View {
                                     tint: .red,
                                     help: "This data changed since the list was saved, so it can no longer be recovered"
                                 )
+                            } else if item.reviewMark == .skipped {
+                                StatusBadge(text: "Skipped", tint: .gray,
+                                            help: "Marked to skip — kept out of Select All")
+                            } else if item.reviewMark == .recoveredElsewhere {
+                                StatusBadge(text: "Recovered elsewhere", tint: .teal,
+                                            help: "You already have this file from another source")
                             } else if item.isDuplicate {
                                 StatusBadge(
                                     text: "Duplicate",
@@ -695,6 +728,8 @@ private struct ResultsView: View {
                 Button("Remove \(ids.count) from Recovery") {
                     viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
                 }
+
+                ReviewMarkMenuItems(viewModel: viewModel, ids: ids)
             }
         }
     }
@@ -853,6 +888,12 @@ private struct GalleryCell: View {
                     StatusBadge(text: "Recovered", tint: .green)
                 } else if item.previouslyRecovered {
                     StatusBadge(text: "Recovered previously", tint: .orange)
+                } else if item.reviewMark == .skipped {
+                    StatusBadge(text: "Skipped", tint: .gray,
+                                help: "Marked to skip — kept out of Select All")
+                } else if item.reviewMark == .recoveredElsewhere {
+                    StatusBadge(text: "Recovered elsewhere", tint: .teal,
+                                help: "You already have this file from another source")
                 } else if item.isDuplicate {
                     StatusBadge(text: "Duplicate", tint: .purple,
                                 help: "Same first 4 KB and size as an earlier result")
@@ -881,6 +922,8 @@ private struct GalleryCell: View {
             Button("Remove \(ids.count) from Recovery") {
                 viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
             }
+
+            ReviewMarkMenuItems(viewModel: viewModel, ids: ids)
         }
     }
 

@@ -119,8 +119,76 @@ enum ResultsViewMode: String, CaseIterable, Identifiable {
 enum RecoveredVisibility: String, CaseIterable, Identifiable {
     case all = "All"
     case unrecovered = "New"
+    case marked = "Marked"
     case recovered = "Recovered"
     var id: String { rawValue }
+}
+
+/// A durable per-file judgement, distinct from the session-scoped recovery
+/// checkbox: "skip this" and "I already have this from somewhere else" are
+/// facts about the file that should survive a rescan.
+enum ReviewMark: String, Codable, Sendable {
+    case skipped
+    case recoveredElsewhere
+}
+
+/// Persistent review marks, keyed like RecoveryLog (volume serial + offset +
+/// length) but in its own file — recovered.json is irreplaceable and shouldn't
+/// take on a second concern.
+struct ReviewLog {
+    private var marks: [String: ReviewMark]
+    private let fileURL: URL
+    /// False when the file exists but couldn't be parsed. Saving is refused so
+    /// a corrupt file is never overwritten by an empty session.
+    private(set) var isReadable = true
+    private(set) var loadError: String?
+
+    static var defaultURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FileRecovery", isDirectory: true)
+            .appendingPathComponent("review.json")
+    }
+
+    static func load(from url: URL = defaultURL) -> ReviewLog {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return ReviewLog(marks: [:], fileURL: url)
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            let marks = try JSONDecoder().decode([String: ReviewMark].self, from: data)
+            return ReviewLog(marks: marks, fileURL: url)
+        } catch {
+            var log = ReviewLog(marks: [:], fileURL: url)
+            log.isReadable = false
+            log.loadError = "Review marks at \(url.path) could not be read "
+                + "(\(error.localizedDescription)). They will not be overwritten."
+            return log
+        }
+    }
+
+    func mark(for key: String) -> ReviewMark? {
+        marks[key]
+    }
+
+    mutating func set(_ mark: ReviewMark?, for key: String) {
+        marks[key] = mark
+    }
+
+    /// Returns an error string when the log could not be written.
+    @discardableResult
+    func save() -> String? {
+        guard isReadable else { return loadError }
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try JSONEncoder().encode(marks).write(to: fileURL, options: .atomic)
+            return nil
+        } catch {
+            return "Could not save review marks: \(error.localizedDescription)"
+        }
+    }
 }
 
 /// Persistent record of recovered files, keyed by volume serial + location,
@@ -208,6 +276,8 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     /// True when an earlier result in this scan had the same fingerprint.
     /// A heuristic, not proof — see RecoveryScanner.fingerprint.
     var isDuplicate = false
+    /// Durable user judgement (skip / recovered elsewhere), from ReviewLog.
+    var reviewMark: ReviewMark?
     /// Prefix-and-length hash, kept so a manifest can re-verify this data is
     /// still on the drive before recovering from recorded offsets.
     var fingerprint: String?
