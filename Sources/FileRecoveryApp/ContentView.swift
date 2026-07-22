@@ -199,6 +199,11 @@ private struct Sidebar: View {
 
                     SidebarCard(title: "Media") {
                         MediaFilterList(viewModel: viewModel)
+                        if viewModel.selectedKinds.isEmpty {
+                            Text("Nothing selected — the scan will look for every type.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 10) {

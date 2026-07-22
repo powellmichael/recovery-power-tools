@@ -9,7 +9,9 @@ import UniformTypeIdentifiers
 final class RecoveryViewModel: ObservableObject {
     @Published var target: ScanTarget?
     @Published var destinationURL: URL?
-    @Published var selectedKinds: Set<MediaKind> = [.jpeg]
+    /// Empty means "every type" at scan time — see effectiveKinds. Nothing is
+    /// checked by default so a scan defaults to finding everything.
+    @Published var selectedKinds: Set<MediaKind> = []
     @Published var items: [RecoveredItem] = []
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
@@ -135,7 +137,13 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     var canScan: Bool {
-        target != nil && !isScanActive && state != .recovering && !selectedKinds.isEmpty
+        target != nil && !isScanActive && state != .recovering
+    }
+
+    /// Kinds the scan actually looks for: the selection, or every kind when
+    /// nothing is checked.
+    var effectiveKinds: Set<MediaKind> {
+        selectedKinds.isEmpty ? Set(MediaKind.allCases) : selectedKinds
     }
 
     var canRecover: Bool {
@@ -393,7 +401,7 @@ final class RecoveryViewModel: ObservableObject {
         state = .scanning
 
         let scanner = scanner
-        let kinds = selectedKinds
+        let kinds = effectiveKinds
         let gate = PauseGate()
         pauseGate = gate
 

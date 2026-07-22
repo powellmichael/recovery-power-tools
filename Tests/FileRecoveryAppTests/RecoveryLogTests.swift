@@ -418,3 +418,18 @@ private func tempLogURL() -> URL {
         #expect(!stamped[0].previouslyRecovered)
     }
 }
+
+@MainActor
+@Suite struct EffectiveKindsTests {
+    @Test func emptySelectionMeansEveryKind() {
+        let vm = RecoveryViewModel()
+        #expect(vm.selectedKinds.isEmpty)
+        #expect(vm.effectiveKinds == Set(MediaKind.allCases))
+    }
+
+    @Test func selectionIsUsedVerbatimWhenNonEmpty() {
+        let vm = RecoveryViewModel()
+        vm.selectedKinds = [.jpeg, .png]
+        #expect(vm.effectiveKinds == [.jpeg, .png])
+    }
+}
