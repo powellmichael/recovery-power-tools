@@ -433,3 +433,19 @@ private func tempLogURL() -> URL {
         #expect(vm.effectiveKinds == [.jpeg, .png])
     }
 }
+
+@MainActor
+@Suite struct RecoveryCompletePromptTests {
+    /// Unchecking after recovery clears only the recovered files, leaving other
+    /// queued files selected.
+    @Test func uncheckClearsOnlyRecoveredFiles() {
+        let a = UUID(), b = UUID(), c = UUID()
+        let vm = RecoveryViewModel()
+        vm.selectedRecoveryIDs = [a, b, c]
+
+        vm.stageJustRecoveredForTesting([a, b])
+        vm.uncheckRecoveredFiles()
+
+        #expect(vm.selectedRecoveryIDs == [c])
+    }
+}

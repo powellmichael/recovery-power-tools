@@ -37,6 +37,13 @@ final class RecoveryViewModel: ObservableObject {
     @Published var zipFileName = ""
     @Published var recoveredVisibility: RecoveredVisibility = .all
     @Published var showClearFilterPrompt = false
+    /// Recovery-complete prompt, offering to uncheck the files just written.
+    @Published var showRecoveryCompletePrompt = false
+    @Published private(set) var recoveryFailureCount = 0
+    private var justRecoveredIDs: [RecoveredItem.ID] = []
+
+    /// How many files the just-finished recovery wrote — drives the prompt text.
+    var justRecoveredCount: Int { justRecoveredIDs.count }
     @Published var viewMode: ResultsViewMode = .list
     @Published private(set) var thumbnails: [RecoveredItem.ID: NSImage] = [:]
     private var thumbnailsRequested: Set<RecoveredItem.ID> = []
@@ -846,25 +853,42 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     private func applyRecoveryOutcomes(_ outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)], clearZipNameOnSuccess: Bool = false) {
-        var recordedAny = false
+        var recovered: [RecoveredItem.ID] = []
+        var failed = 0
         for outcome in outcomes {
             guard let index = items.firstIndex(where: { $0.id == outcome.id }) else { continue }
             if let url = outcome.url {
                 items[index].recoveredURL = url
                 items[index].recoveryError = nil
                 recoveryLog.record(logKey(for: items[index]))
-                recordedAny = true
+                recovered.append(outcome.id)
             } else {
                 items[index].recoveryError = outcome.error
+                failed += 1
             }
         }
-        if recordedAny {
+        if !recovered.isEmpty {
             logWarning = recoveryLog.save()
             if clearZipNameOnSuccess {
                 zipFileName = ""
             }
+            justRecoveredIDs = recovered
+            recoveryFailureCount = failed
+            showRecoveryCompletePrompt = true
         }
         state = .finished
+    }
+
+    /// Test hook: stage a set as the just-recovered files.
+    func stageJustRecoveredForTesting(_ ids: [RecoveredItem.ID]) {
+        justRecoveredIDs = ids
+    }
+
+    /// The completion prompt's "Uncheck" action: clears just the files this
+    /// recovery wrote, leaving any other checked files queued.
+    func uncheckRecoveredFiles() {
+        selectedRecoveryIDs.subtract(justRecoveredIDs)
+        justRecoveredIDs = []
     }
 
     func clearPreview() {

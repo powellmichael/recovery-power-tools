@@ -55,6 +55,26 @@ struct ContentView: View {
             FullSizePreview(viewModel: viewModel)
         }
         .preferredColorScheme(appearance.colorScheme)
+        .alert("Recovery complete", isPresented: Binding(
+            get: { viewModel.showRecoveryCompletePrompt },
+            set: { viewModel.showRecoveryCompletePrompt = $0 }
+        )) {
+            Button("Uncheck Recovered Files") { viewModel.uncheckRecoveredFiles() }
+            Button("Keep Selected", role: .cancel) {}
+        } message: {
+            Text(recoveryCompleteMessage)
+        }
+    }
+
+    private var recoveryCompleteMessage: String {
+        let n = viewModel.justRecoveredCount
+        var text = "Recovered \(n) file\(n == 1 ? "" : "s"). "
+        if viewModel.recoveryFailureCount > 0 {
+            let f = viewModel.recoveryFailureCount
+            text += "\(f) file\(f == 1 ? "" : "s") could not be recovered. "
+        }
+        text += "Uncheck the recovered files so they're no longer selected?"
+        return text
     }
 }
 
