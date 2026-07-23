@@ -37,6 +37,8 @@ final class RecoveryViewModel: ObservableObject {
     @Published var zipFileName = ""
     @Published var recoveredVisibility: RecoveredVisibility = .all
     @Published var showClearFilterPrompt = false
+    /// Fast scan: quicker but skips brute-force recovery of damaged files.
+    @Published var fastScan = false
     /// Recovery-complete prompt, offering to uncheck the files just written.
     @Published var showRecoveryCompletePrompt = false
     @Published private(set) var recoveryFailureCount = 0
@@ -407,7 +409,9 @@ final class RecoveryViewModel: ObservableObject {
         clearThumbnails()
         state = .scanning
 
-        let scanner = scanner
+        var configured = scanner
+        configured.fastScan = fastScan
+        let scanner = configured
         let kinds = effectiveKinds
         let gate = PauseGate()
         pauseGate = gate

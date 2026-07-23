@@ -227,6 +227,12 @@ private struct Sidebar: View {
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Fast scan", isOn: Binding(
+                            get: { viewModel.fastScan },
+                            set: { viewModel.fastScan = $0 }
+                        ))
+                        .help("Much faster, but may miss or truncate badly damaged files. Intact files are unaffected.")
+
                         Toggle("Save as ZIP", isOn: Binding(
                             get: { viewModel.saveAsZip },
                             set: { viewModel.saveAsZip = $0 }

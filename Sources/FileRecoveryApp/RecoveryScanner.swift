@@ -14,12 +14,20 @@ private final class DuplicateTracker {
 }
 
 struct RecoveryScanner: Sendable {
+    /// Fast scan trades a little recovery completeness for speed: it drops the
+    /// brute-force end-marker fallback and caps the forward search hard. Most
+    /// scan time on a large drive goes into that fallback re-reading up to
+    /// hundreds of MB of random data on every false header, so removing it is
+    /// the single biggest speed lever. Structurally intact files are unaffected;
+    /// badly damaged ones may be missed or truncated.
+    var fastScan = false
+
     private let chunkSize = 4 * 1024 * 1024
     private let fingerprintPrefix = 4 * 1024
     private let overlapSize = 128 * 1024
     private let maxCarveSize: UInt64 = 2 * 1024 * 1024 * 1024
-    private let jpegSearchCap: UInt64 = 256 * 1024 * 1024
-    private let pngSearchCap: UInt64 = 1024 * 1024 * 1024
+    private var jpegSearchCap: UInt64 { fastScan ? 16 * 1024 * 1024 : 256 * 1024 * 1024 }
+    private var pngSearchCap: UInt64 { fastScan ? 16 * 1024 * 1024 : 1024 * 1024 * 1024 }
 
     // MARK: - Planning
 
@@ -313,6 +321,10 @@ struct RecoveryScanner: Sendable {
             if let length = try jpegLength(in: source, from: absolute, regionEnd: regionEnd) {
                 return Candidate(kind: .jpeg, start: index, length: length, ext: nil)
             }
+            // Fast scan skips the brute-force FFD9 search: it's the dominant cost
+            // on a large drive, since a false FFD8FF in random data scans forward
+            // to the cap before giving up.
+            if fastScan { return nil }
             guard let end = try findMarkerEnd(in: source, from: absolute + 3, limit: limit, marker: [0xFF, 0xD9]) else { return nil }
             return Candidate(kind: .jpeg, start: index, length: end - absolute, ext: nil)
 
