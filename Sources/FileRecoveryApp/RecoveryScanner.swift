@@ -273,9 +273,25 @@ struct RecoveryScanner: Sendable {
         let bytes = [UInt8](data)
         guard !bytes.isEmpty else { return [] }
 
+        // Only a dozen byte values can begin any signature, so skip the rest
+        // with a table lookup instead of a throwing call per byte. detect()
+        // still decides — this only avoids calling it ~95% of the time.
+        let starters = Self.signatureStarters(for: selectedKinds)
+        // Cancellation was checked per byte, which dominated scan time on a
+        // large drive. Once per megabyte keeps cancellation responsive.
+        let cancellationStride = 1024 * 1024
+        var nextCancellationCheck = 0
+
         var index = 0
         while index < searchLimit {
-            try Task.checkCancellation()
+            if index >= nextCancellationCheck {
+                try Task.checkCancellation()
+                nextCancellationCheck = index + cancellationStride
+            }
+            guard starters[Int(bytes[index])] else {
+                index += 1
+                continue
+            }
             if let candidate = try detect(bytes, index, source: source, regionEnd: regionEnd, baseOffset: baseOffset, kinds: selectedKinds) {
                 let byteOffset = baseOffset + UInt64(candidate.start)
                 // A deleted directory entry starting exactly here supplies the
@@ -300,6 +316,30 @@ struct RecoveryScanner: Sendable {
         }
 
         return results
+    }
+
+    /// First bytes that can begin a signature for the selected kinds. Mirrors
+    /// the cases in detect(); a byte missing here is never offered to it, so
+    /// the two must be kept in step (a test pins that they are).
+    static func signatureStarters(for kinds: Set<MediaKind>) -> [Bool] {
+        var table = [Bool](repeating: false, count: 256)
+        func allow(_ values: [Int]) { for value in values { table[value] = true } }
+
+        if kinds.contains(.jpeg) { allow([0xFF]) }
+        if kinds.contains(.png) { allow([0x89]) }
+        // "ftyp" boxes carry both MP4-family video and HEIC.
+        if kinds.contains(.video) || kinds.contains(.heic) { allow([0x66]) }
+        if kinds.contains(.zip) { allow([0x50]) }
+        if kinds.contains(.bmp) { allow([0x42]) }
+        if kinds.contains(.avi) { allow([0x52]) }
+        if kinds.contains(.wmv) { allow([0x30]) }
+        if kinds.contains(.flv) { allow([0x46]) }
+        // RAW: FUJIFILM RAF starts with "F"; TIFF-family starts "II" or "MM".
+        if kinds.contains(.raw) { allow([0x46, 0x49, 0x4D]) }
+        if kinds.contains(.webm) { allow([0x1A]) }
+        if kinds.contains(.mpeg) { allow([0x00]) }
+
+        return table
     }
 
     private func detect(

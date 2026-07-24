@@ -364,3 +364,33 @@ private func be32(_ value: UInt32) -> [UInt8] {
         #expect(items.isEmpty)
     }
 }
+
+@Suite struct SignatureTableTests {
+    /// The starter table gates which bytes reach detect(). If a format's first
+    /// byte is missing, that format silently stops being found — so every kind
+    /// must contribute at least one starter, and carving must still work with
+    /// every kind selected (covered by carvesSyntheticBlob).
+    @Test func everyKindHasAStarter() {
+        for kind in MediaKind.allCases {
+            let table = RecoveryScanner.signatureStarters(for: [kind])
+            #expect(table.contains(true), "\(kind.rawValue) has no signature starter byte")
+        }
+    }
+
+    /// Selecting nothing must gate everything off rather than scanning blindly.
+    @Test func emptySelectionHasNoStarters() {
+        #expect(!RecoveryScanner.signatureStarters(for: []).contains(true))
+    }
+
+    /// A kind's starters must be a subset of the union — guards against a typo
+    /// adding a byte for one kind that the combined table misses.
+    @Test func unionCoversEveryIndividualKind() {
+        let union = RecoveryScanner.signatureStarters(for: Set(MediaKind.allCases))
+        for kind in MediaKind.allCases {
+            let single = RecoveryScanner.signatureStarters(for: [kind])
+            for index in 0..<256 where single[index] {
+                #expect(union[index], "byte \(index) for \(kind.rawValue) missing from union")
+            }
+        }
+    }
+}
