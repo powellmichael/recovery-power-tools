@@ -2,15 +2,51 @@ import AppKit
 import AVKit
 import SwiftUI
 
+/// User-facing appearance preference. System follows the Mac's setting by
+/// mapping to a nil preferredColorScheme.
+enum AppearancePreference: String, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: "System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .system: "circle.lefthalf.filled"
+        case .light: "sun.max"
+        case .dark: "moon"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var viewModel = RecoveryViewModel()
+    @AppStorage("appearance") private var appearanceRaw = AppearancePreference.system.rawValue
+
+    private var appearance: AppearancePreference {
+        AppearancePreference(rawValue: appearanceRaw) ?? .system
+    }
 
     var body: some View {
         NavigationSplitView {
             Sidebar(viewModel: viewModel)
-                .navigationSplitViewColumnWidth(min: 260, ideal: 300)
+                .navigationSplitViewColumnWidth(min: 270, ideal: 310)
         } detail: {
-            ResultsView(viewModel: viewModel)
+            ResultsView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
         }
         .sheet(isPresented: Binding(
             get: { viewModel.showFullSizePreview && viewModel.previewImage != nil },
@@ -18,6 +54,27 @@ struct ContentView: View {
         )) {
             FullSizePreview(viewModel: viewModel)
         }
+        .preferredColorScheme(appearance.colorScheme)
+        .alert("Recovery complete", isPresented: Binding(
+            get: { viewModel.showRecoveryCompletePrompt },
+            set: { viewModel.showRecoveryCompletePrompt = $0 }
+        )) {
+            Button("Uncheck Recovered Files") { viewModel.uncheckRecoveredFiles() }
+            Button("Keep Selected", role: .cancel) {}
+        } message: {
+            Text(recoveryCompleteMessage)
+        }
+    }
+
+    private var recoveryCompleteMessage: String {
+        let n = viewModel.justRecoveredCount
+        var text = "Recovered \(n) file\(n == 1 ? "" : "s"). "
+        if viewModel.recoveryFailureCount > 0 {
+            let f = viewModel.recoveryFailureCount
+            text += "\(f) file\(f == 1 ? "" : "s") could not be recovered. "
+        }
+        text += "Uncheck the recovered files so they're no longer selected?"
+        return text
     }
 }
 
@@ -60,9 +117,29 @@ private struct FullSizePreview: View {
                         .frame(width: image.size.width, height: image.size.height)
                 }
             }
-            .background(.black.opacity(0.6))
+            // Adapts to appearance; the old hardcoded black wash was wrong in
+            // light mode.
+            .background(Color(nsColor: .underPageBackgroundColor))
         }
         .frame(minWidth: 600, idealWidth: 1000, minHeight: 400, idealHeight: 720)
+    }
+}
+
+/// A quiet titled card, the sidebar's basic unit.
+private struct SidebarCard<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            content
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -75,31 +152,40 @@ private struct Sidebar: View {
         // pinned to the bottom so scan progress is visible while scrolled.
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Source")
-                            .font(.headline)
-                        PathRow(label: viewModel.sourceLabel, placeholder: "No source selected")
-                        Menu {
-                            if viewModel.externalDevices.isEmpty {
-                                Text("No external drives found")
-                            }
-                            ForEach(viewModel.externalDevices) { device in
-                                Button(device.displayName) {
-                                    viewModel.chooseDevice(device)
+                VStack(alignment: .leading, spacing: 12) {
+                    SidebarCard(title: "Source") {
+                        PathRow(
+                            label: viewModel.sourceLabel,
+                            placeholder: "No source selected",
+                            systemImage: "externaldrive"
+                        )
+                        HStack(spacing: 6) {
+                            Menu {
+                                if viewModel.externalDevices.isEmpty {
+                                    Text("No external drives found")
                                 }
+                                ForEach(viewModel.externalDevices) { device in
+                                    Button(device.displayName) {
+                                        viewModel.chooseDevice(device)
+                                    }
+                                }
+                                Divider()
+                                Button("Refresh") {
+                                    viewModel.refreshDevices()
+                                }
+                            } label: {
+                                Label("Drive", systemImage: "externaldrive")
+                                    .frame(maxWidth: .infinity)
                             }
-                            Divider()
-                            Button("Refresh") {
-                                viewModel.refreshDevices()
+                            .help("Choose an external drive to scan")
+
+                            Button {
+                                viewModel.chooseSource()
+                            } label: {
+                                Label("File / Folder", systemImage: "folder.badge.gearshape")
+                                    .frame(maxWidth: .infinity)
                             }
-                        } label: {
-                            Label("Choose Drive", systemImage: "externaldrive")
-                        }
-                        Button {
-                            viewModel.chooseSource()
-                        } label: {
-                            Label("Choose File / Folder", systemImage: "folder.badge.gearshape")
+                            .help("Choose a file or folder to scan")
                         }
 
                         if let warning = viewModel.sourceWarning {
@@ -117,26 +203,36 @@ private struct Sidebar: View {
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Destination")
-                            .font(.headline)
-                        PathRow(label: viewModel.destinationURL?.lastPathComponent, placeholder: "No destination selected")
+                    SidebarCard(title: "Destination") {
+                        PathRow(
+                            label: viewModel.destinationURL?.lastPathComponent,
+                            placeholder: "No destination selected",
+                            systemImage: "folder"
+                        )
                         Button {
                             viewModel.chooseDestination()
                         } label: {
                             Label("Choose Folder", systemImage: "folder")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+
+                    SidebarCard(title: "Media") {
+                        MediaFilterList(viewModel: viewModel)
+                        if viewModel.selectedKinds.isEmpty {
+                            Text("Nothing selected — the scan will look for every type.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Media")
-                            .font(.headline)
-                        MediaFilterList(viewModel: viewModel)
-                    }
+                        Toggle("Fast scan", isOn: Binding(
+                            get: { viewModel.fastScan },
+                            set: { viewModel.fastScan = $0 }
+                        ))
+                        .help("Much faster, but may miss or truncate badly damaged files. Intact files are unaffected.")
 
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 12) {
                         Toggle("Save as ZIP", isOn: Binding(
                             get: { viewModel.saveAsZip },
                             set: { viewModel.saveAsZip = $0 }
@@ -157,6 +253,7 @@ private struct Sidebar: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
                         .disabled(!viewModel.canScan)
                         .confirmationDialog(
                             "A filename filter is active",
@@ -181,48 +278,47 @@ private struct Sidebar: View {
                         .disabled(!viewModel.canRecover)
 
                         if viewModel.isScanActive {
-                            Button {
-                                viewModel.togglePause()
-                            } label: {
-                                Label(
-                                    viewModel.state == .paused ? "Resume" : "Pause",
-                                    systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
-                                )
-                                .frame(maxWidth: .infinity)
-                            }
-
-                            Button {
-                                viewModel.cancelScan()
-                            } label: {
-                                Label("Cancel", systemImage: "xmark.circle")
+                            HStack(spacing: 6) {
+                                Button {
+                                    viewModel.togglePause()
+                                } label: {
+                                    Label(
+                                        viewModel.state == .paused ? "Resume" : "Pause",
+                                        systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
+                                    )
                                     .frame(maxWidth: .infinity)
+                                }
+
+                                Button {
+                                    viewModel.cancelScan()
+                                } label: {
+                                    Label("Cancel", systemImage: "xmark.circle")
+                                        .frame(maxWidth: .infinity)
+                                }
                             }
                         }
                     }
 
-                    Divider()
+                    SidebarCard(title: "File List") {
+                        HStack(spacing: 6) {
+                            Button {
+                                viewModel.exportManifest()
+                            } label: {
+                                Label("Export…", systemImage: "square.and.arrow.up")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .disabled(viewModel.items.isEmpty)
+                            .help("Save these results so they can be recovered later without re-scanning")
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("File List")
-                            .font(.headline)
-
-                        Button {
-                            viewModel.exportManifest()
-                        } label: {
-                            Label("Export…", systemImage: "square.and.arrow.up")
-                                .frame(maxWidth: .infinity)
+                            Button {
+                                viewModel.importManifest()
+                            } label: {
+                                Label("Import…", systemImage: "square.and.arrow.down")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .disabled(viewModel.target == nil || viewModel.isScanActive)
+                            .help("Open a saved list and check it against the selected drive")
                         }
-                        .disabled(viewModel.items.isEmpty)
-                        .help("Save these results so they can be recovered later without re-scanning")
-
-                        Button {
-                            viewModel.importManifest()
-                        } label: {
-                            Label("Import…", systemImage: "square.and.arrow.down")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .disabled(viewModel.target == nil || viewModel.isScanActive)
-                        .help("Open a saved list and check it against the selected drive")
 
                         if let status = viewModel.manifestStatus {
                             Text(status)
@@ -232,14 +328,15 @@ private struct Sidebar: View {
                         }
                     }
                 }
-                .padding(20)
+                .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Divider()
 
             StatusBlock(viewModel: viewModel)
-                .padding(20)
+                .padding(14)
+                .background(.quaternary.opacity(0.35))
         }
         .onAppear {
             viewModel.refreshDevices()
@@ -250,66 +347,60 @@ private struct Sidebar: View {
 private struct PathRow: View {
     let label: String?
     let placeholder: String
+    var systemImage = "checkmark.circle"
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: label == nil ? "minus.circle" : "checkmark.circle")
-                .foregroundStyle(label == nil ? Color.secondary : Color.green)
+            Image(systemName: label == nil ? "minus.circle" : systemImage)
+                .foregroundStyle(label == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
             Text(label ?? placeholder)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(label == nil ? .secondary : .primary)
         }
         .font(.callout)
-        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
 private struct StatusBlock: View {
     @ObservedObject var viewModel: RecoveryViewModel
 
+    private var stateLabel: (String, String) {
+        switch viewModel.state {
+        case .idle: ("Ready", "circle")
+        case .scanning: ("Scanning", "waveform.path.ecg")
+        case .paused: ("Paused", "pause.circle")
+        case .recovering: ("Recovering", "tray.and.arrow.down")
+        case .finished: ("Finished", "checkmark.circle")
+        case .failed: ("Needs Attention", "exclamationmark.triangle")
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            switch viewModel.state {
-            case .idle:
-                Label("Ready", systemImage: "circle")
-            case .scanning:
-                Label("Scanning", systemImage: "waveform.path.ecg")
-            case .paused:
-                Label("Paused", systemImage: "pause.circle")
-            case .recovering:
-                Label("Recovering", systemImage: "tray.and.arrow.down")
-            case .finished:
-                Label("Finished", systemImage: "checkmark.circle")
-            case .failed:
-                Label("Needs Attention", systemImage: "exclamationmark.triangle")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(stateLabel.0, systemImage: stateLabel.1)
+                    .font(.callout.weight(.medium))
+                Spacer()
+                if let percent = viewModel.progress.percentLabel, viewModel.progress.totalBytes > 0 {
+                    Text(percent)
+                        .font(.callout.weight(.medium))
+                        .monospacedDigit()
+                        .help("Share of the scanned area read so far. Files are found unevenly, so this is an estimate.")
+                }
             }
 
             ProgressView(value: viewModel.progress.fraction)
                 .opacity(viewModel.isScanActive ? 1 : 0.35)
 
-            if let percent = viewModel.progress.percentLabel, viewModel.progress.totalBytes > 0 {
-                HStack(spacing: 6) {
-                    Text(percent)
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.primary)
-                    if let bytes = viewModel.progress.byteLabel {
-                        Text(bytes)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .help("Share of the scanned area read so far. Files are found unevenly, so this is an estimate.")
+            if let bytes = viewModel.progress.byteLabel, viewModel.progress.totalBytes > 0 {
+                Text(bytes)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            Text("\(viewModel.items.count) item\(viewModel.items.count == 1 ? "" : "s") found")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text("\(viewModel.selectedRecoveryIDs.count) selected")
+            Text("\(viewModel.items.count) found · \(viewModel.selectedRecoveryIDs.count) selected")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -329,96 +420,131 @@ private struct StatusBlock: View {
     }
 }
 
+/// Context-menu section for durable review marks, shared by table and gallery.
+/// Skipping removes items from the recovery queue; both marks survive rescans.
+private struct ReviewMarkMenuItems: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+    let ids: Set<RecoveredItem.ID>
+
+    var body: some View {
+        Divider()
+
+        Button("Skip — Don't Recover") {
+            viewModel.setReviewMark(.skipped, ids: ids)
+        }
+        .help("Hide from New; kept out of Select All. Remembered for this drive.")
+
+        Button("Mark as Recovered Elsewhere") {
+            viewModel.setReviewMark(.recoveredElsewhere, ids: ids)
+        }
+        .help("You already have this file from another source. Shows under Recovered.")
+
+        if viewModel.markCount(.skipped, in: ids) > 0 || viewModel.markCount(.recoveredElsewhere, in: ids) > 0 {
+            Button("Clear Skip / Elsewhere Marks") {
+                viewModel.setReviewMark(nil, ids: ids)
+            }
+        }
+    }
+}
+
+/// Small tinted capsule for statuses, replacing bare colored text.
+private struct StatusBadge: View {
+    let text: String
+    let tint: Color
+    var help: String?
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.medium))
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .foregroundStyle(tint)
+            .background(tint.opacity(0.14), in: Capsule())
+            .help(help ?? text)
+    }
+}
+
+/// Metric chip above the results: label over a number.
+private struct StatChip: View {
+    let label: String
+    let value: String
+    var detail: String?
+    var tint: Color?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(tint ?? .secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(value)
+                    .font(.title3.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(tint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((tint ?? Color.primary).opacity(tint == nil ? 0.05 : 0.1), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct ResultsView: View {
     @ObservedObject var viewModel: RecoveryViewModel
+    @Binding var appearanceRaw: String
+
+    private var recoveredCount: Int {
+        viewModel.items.count { $0.recoveredURL != nil || $0.previouslyRecovered }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Recoverable Media")
-                    .font(.title2.bold())
-                Spacer()
-                if !viewModel.items.isEmpty {
-                    Picker("", selection: Binding(
-                        get: { viewModel.viewMode },
-                        set: { viewModel.viewMode = $0 }
-                    )) {
-                        ForEach(ResultsViewMode.allCases) { mode in
-                            Image(systemName: mode.systemImage).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 90)
-                    .labelsHidden()
-                    .help("Switch between list and gallery")
+            toolbar
 
-                    Picker("", selection: Binding(
-                        get: { viewModel.recoveredVisibility },
-                        set: { viewModel.recoveredVisibility = $0 }
-                    )) {
-                        ForEach(RecoveredVisibility.allCases) { visibility in
-                            Text(visibility.rawValue).tag(visibility)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 220)
-                    .labelsHidden()
+            Divider()
 
-                    HStack(spacing: 6) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundStyle(.secondary)
-                        TextField("Filter by filename", text: Binding(
-                            get: { viewModel.filenameFilter },
-                            set: { viewModel.filenameFilter = $0 }
-                        ))
-                        .textFieldStyle(.plain)
-                        if !viewModel.filenameFilter.isEmpty {
-                            Button {
-                                viewModel.filenameFilter = ""
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(6)
-                    .frame(maxWidth: 240)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-
-                    Button {
-                        viewModel.selectAllForRecovery()
-                    } label: {
-                        Label("Select All", systemImage: "checklist.checked")
-                    }
-                    .help(viewModel.duplicateCount > 0
-                          ? "Selects everything except \(viewModel.duplicateCount) duplicate\(viewModel.duplicateCount == 1 ? "" : "s")"
-                          : "Selects every visible result")
-
-                    Button {
-                        viewModel.selectNoneForRecovery()
-                    } label: {
-                        Label("Select None", systemImage: "checklist.unchecked")
-                    }
+            if !viewModel.items.isEmpty {
+                HStack(spacing: 10) {
+                    StatChip(label: "Found", value: "\(viewModel.items.count)", detail: filteredDetail)
+                    StatChip(label: "Selected", value: "\(viewModel.selectedRecoveryIDs.count)", detail: selectedSize)
+                    StatChip(
+                        label: "Recovered",
+                        value: "\(recoveredCount)",
+                        detail: viewModel.volumeHistoryCount > 0
+                            ? "of \(viewModel.volumeHistoryCount) ever on this drive"
+                            : nil,
+                        tint: recoveredCount > 0 ? .green : nil
+                    )
                 }
-                Text(totalSize)
-                    .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
-            .padding([.horizontal, .top], 22)
-            .padding(.bottom, 14)
 
             if let note = viewModel.scanNote {
                 Label(note, systemImage: "info.circle.fill")
                     .font(.callout)
+                    .foregroundStyle(.blue)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                    .padding(.horizontal, 22)
-                    .padding(.bottom, 10)
+                    .padding(10)
+                    .background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
             }
 
             if viewModel.items.isEmpty {
                 EmptyResultsView()
+            } else if viewModel.filteredItems.isEmpty {
+                // Results exist but the current view shows none — say why,
+                // because an unexplained empty list reads as lost data.
+                EmptyFilterExplanation(visibility: viewModel.recoveredVisibility)
             } else {
                 HSplitView {
                     Group {
@@ -428,17 +554,110 @@ private struct ResultsView: View {
                             resultsTable
                         }
                     }
-                    .frame(minWidth: 600)
+                    // maxWidth .infinity keeps this side flexible, so when the
+                    // preview pane closes HSplitView stretches it back to full
+                    // width instead of leaving dead space where the pane was.
+                    .frame(minWidth: 600, maxWidth: .infinity)
 
                     if viewModel.isPreviewPaneVisible {
                         PreviewPane(viewModel: viewModel)
                             .frame(minWidth: 260, idealWidth: 320, maxWidth: 420)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 14)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
             }
         }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 10) {
+            Text("Recoverable Media")
+                .font(.headline)
+            Spacer()
+            if !viewModel.items.isEmpty {
+                Picker("", selection: Binding(
+                    get: { viewModel.viewMode },
+                    set: { viewModel.viewMode = $0 }
+                )) {
+                    ForEach(ResultsViewMode.allCases) { mode in
+                        Image(systemName: mode.systemImage).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 90)
+                .labelsHidden()
+                .help("Switch between list and gallery")
+
+                Picker("", selection: Binding(
+                    get: { viewModel.recoveredVisibility },
+                    set: { viewModel.recoveredVisibility = $0 }
+                )) {
+                    ForEach(RecoveredVisibility.allCases) { visibility in
+                        Text(visibility.rawValue).tag(visibility)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 200)
+                .labelsHidden()
+
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Filter by filename", text: Binding(
+                        get: { viewModel.filenameFilter },
+                        set: { viewModel.filenameFilter = $0 }
+                    ))
+                    .textFieldStyle(.plain)
+                    if !viewModel.filenameFilter.isEmpty {
+                        Button {
+                            viewModel.filenameFilter = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .frame(maxWidth: 220)
+                .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+
+                Menu {
+                    Button("Select All") { viewModel.selectAllForRecovery() }
+                    Button("Select None") { viewModel.selectNoneForRecovery() }
+                } label: {
+                    Image(systemName: "checklist")
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 44)
+                .help(viewModel.duplicateCount > 0
+                      ? "Select All picks everything except \(viewModel.duplicateCount) duplicate\(viewModel.duplicateCount == 1 ? "" : "s")"
+                      : "Select or deselect every visible result")
+            }
+
+            Menu {
+                ForEach(AppearancePreference.allCases) { preference in
+                    Button {
+                        appearanceRaw = preference.rawValue
+                    } label: {
+                        if preference.rawValue == appearanceRaw {
+                            Label(preference.label, systemImage: "checkmark")
+                        } else {
+                            Text(preference.label)
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: (AppearancePreference(rawValue: appearanceRaw) ?? .system).systemImage)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 40)
+            .help("Appearance")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private var resultsTable: some View {
@@ -458,18 +677,24 @@ private struct ResultsView: View {
                         }
                         .width(34)
 
-                        TableColumn("Type") { item in
-                            Label(item.kind.rawValue, systemImage: icon(for: item.kind))
-                        }
-                        .width(min: 110, ideal: 130)
-
                         TableColumn("Filename", value: \.filenameLabel) { item in
-                            Text(item.filenameLabel)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .foregroundStyle(item.originalFilename == nil ? .secondary : .primary)
+                            HStack(spacing: 6) {
+                                Image(systemName: icon(for: item.kind))
+                                    .foregroundStyle(.secondary)
+                                    .help(item.kind.rawValue)
+                                Text(item.filenameLabel)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .foregroundStyle(item.originalFilename == nil ? .secondary : .primary)
+                            }
                         }
-                        .width(min: 150, ideal: 200)
+                        .width(min: 170, ideal: 240)
+
+                        TableColumn("Type") { item in
+                            Text(item.kind.rawValue)
+                                .foregroundStyle(.secondary)
+                        }
+                        .width(min: 90, ideal: 110)
 
                         TableColumn("Preview") { item in
                             if item.kind.isPreviewable || item.kind.isVideoPreviewable {
@@ -487,33 +712,35 @@ private struct ResultsView: View {
 
                         TableColumn("Size", value: \.byteLength) { item in
                             Text(item.sizeLabel)
+                                .monospacedDigit()
                         }
                         .width(min: 90, ideal: 110)
 
                         TableColumn("Status") { item in
                             if let recoveredURL = item.recoveredURL {
-                                Text(recoveredURL.lastPathComponent)
-                                    .foregroundStyle(.green)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                                StatusBadge(text: recoveredURL.lastPathComponent, tint: .green)
                             } else if let recoveryError = item.recoveryError {
-                                Text(recoveryError)
-                                    .foregroundStyle(.red)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                    .help(recoveryError)
+                                StatusBadge(text: recoveryError, tint: .red, help: recoveryError)
                             } else if item.previouslyRecovered {
-                                Text("Recovered previously")
-                                    .foregroundStyle(.orange)
+                                StatusBadge(text: "Recovered previously", tint: .orange)
                             } else if let stale = viewModel.staleReason(for: item) {
-                                Text(stale.rawValue)
-                                    .foregroundStyle(.red)
-                                    .lineLimit(1)
-                                    .help("This data changed since the list was saved, so it can no longer be recovered")
+                                StatusBadge(
+                                    text: stale.rawValue,
+                                    tint: .red,
+                                    help: "This data changed since the list was saved, so it can no longer be recovered"
+                                )
+                            } else if item.reviewMark == .skipped {
+                                StatusBadge(text: "Skipped", tint: .gray,
+                                            help: "Marked to skip — kept out of Select All")
+                            } else if item.reviewMark == .recoveredElsewhere {
+                                StatusBadge(text: "Recovered elsewhere", tint: .teal,
+                                            help: "You already have this file from another source")
                             } else if item.isDuplicate {
-                                Text("Duplicate")
-                                    .foregroundStyle(.purple)
-                                    .help("Same first 4 KB and size as an earlier result")
+                                StatusBadge(
+                                    text: "Duplicate",
+                                    tint: .purple,
+                                    help: "Same first 4 KB and size as an earlier result"
+                                )
                             } else {
                                 Text("Pending")
                                     .foregroundStyle(.secondary)
@@ -543,16 +770,24 @@ private struct ResultsView: View {
                 Button("Remove \(ids.count) from Recovery") {
                     viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
                 }
+
+                ReviewMarkMenuItems(viewModel: viewModel, ids: ids)
             }
         }
     }
 
-    private var totalSize: String {
-        let visible = viewModel.filteredItems
-        let total = visible.reduce(UInt64(0)) { $0 + $1.byteLength }
-        let size = ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
-        guard visible.count != viewModel.items.count else { return size }
-        return "\(visible.count) of \(viewModel.items.count) — \(size)"
+    private var filteredDetail: String? {
+        let visible = viewModel.filteredItems.count
+        guard visible != viewModel.items.count else { return nil }
+        return "\(visible) shown"
+    }
+
+    private var selectedSize: String? {
+        guard !viewModel.selectedRecoveryIDs.isEmpty else { return nil }
+        let total = viewModel.items
+            .filter { viewModel.selectedRecoveryIDs.contains($0.id) }
+            .reduce(UInt64(0)) { $0 + $1.byteLength }
+        return ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
     }
 }
 
@@ -584,21 +819,32 @@ private struct MediaFilterList: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 4)
+                .padding(.leading, 2)
             } label: {
                 Toggle(isOn: Binding(
                     get: { viewModel.allSelected(in: category) },
                     set: { viewModel.setKinds(in: category, on: $0) }
                 )) {
                     HStack(spacing: 6) {
+                        Image(systemName: categoryIcon(category))
+                            .foregroundStyle(.secondary)
                         Text(category.rawValue)
                         if viewModel.someSelected(in: category), !viewModel.allSelected(in: category) {
                             Text("\(category.kinds.filter(viewModel.selectedKinds.contains).count)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.tint)
                         }
                     }
                 }
             }
+        }
+    }
+
+    private func categoryIcon(_ category: MediaCategory) -> String {
+        switch category {
+        case .images: "photo"
+        case .video: "video"
+        case .archives: "archivebox"
         }
     }
 }
@@ -614,17 +860,18 @@ private func icon(for kind: MediaKind) -> String {
 private struct GalleryView: View {
     @ObservedObject var viewModel: RecoveryViewModel
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 14), count: 4)
+    // Adaptive: uses window width instead of stretching a fixed 4 columns.
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12)]
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 14) {
+            LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(viewModel.filteredItems) { item in
                     GalleryCell(viewModel: viewModel, item: item)
                         .onAppear { viewModel.requestThumbnail(for: item) }
                 }
             }
-            .padding(14)
+            .padding(12)
         }
     }
 }
@@ -636,7 +883,7 @@ private struct GalleryCell: View {
     private var isSelected: Bool { viewModel.tableSelection.contains(item.id) }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             ZStack(alignment: .topLeading) {
                 Button {
                     // Modifiers are read at click time: SwiftUI buttons don't
@@ -653,8 +900,9 @@ private struct GalleryCell: View {
                 } label: {
                     thumbnail
                         .frame(maxWidth: .infinity)
-                        .frame(height: 130)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                        .frame(height: 124)
+                        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
                 .help("Click to show or hide details. Shift-click to select a range, Command-click to add one.")
@@ -669,31 +917,40 @@ private struct GalleryCell: View {
 
             Text(item.filenameLabel)
                 .font(.caption)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
+                .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(item.originalFilename == nil ? .secondary : .primary)
 
-            Text(item.sizeLabel)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                Text(item.sizeLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
 
-            if item.recoveredURL != nil {
-                Label("Recovered", systemImage: "checkmark.circle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.green)
-            } else if item.previouslyRecovered {
-                Label("Recovered previously", systemImage: "clock.arrow.circlepath")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .lineLimit(1)
+                if item.recoveredURL != nil {
+                    StatusBadge(text: "Recovered", tint: .green)
+                } else if item.previouslyRecovered {
+                    StatusBadge(text: "Recovered previously", tint: .orange)
+                } else if item.reviewMark == .skipped {
+                    StatusBadge(text: "Skipped", tint: .gray,
+                                help: "Marked to skip — kept out of Select All")
+                } else if item.reviewMark == .recoveredElsewhere {
+                    StatusBadge(text: "Recovered elsewhere", tint: .teal,
+                                help: "You already have this file from another source")
+                } else if item.isDuplicate {
+                    StatusBadge(text: "Duplicate", tint: .purple,
+                                help: "Same first 4 KB and size as an earlier result")
+                }
             }
         }
         .padding(8)
-        .background(isSelected ? AnyShapeStyle(.selection) : AnyShapeStyle(.clear), in: RoundedRectangle(cornerRadius: 8))
+        .background(
+            isSelected ? AnyShapeStyle(Color.accentColor.opacity(0.12)) : AnyShapeStyle(.quaternary.opacity(0.4)),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
         .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.08),
+                              lineWidth: isSelected ? 2 : 1)
         }
         .contextMenu {
             // A right-click on an unselected cell acts on that cell alone.
@@ -707,6 +964,8 @@ private struct GalleryCell: View {
             Button("Remove \(ids.count) from Recovery") {
                 viewModel.setSelectedForRecovery(ids: ids, isSelected: false)
             }
+
+            ReviewMarkMenuItems(viewModel: viewModel, ids: ids)
         }
     }
 
@@ -728,7 +987,7 @@ private struct GalleryCell: View {
                 }
         } else {
             Image(systemName: icon(for: item.kind))
-                .font(.system(size: 32))
+                .font(.system(size: 30))
                 .foregroundStyle(.secondary)
         }
     }
@@ -794,14 +1053,14 @@ private struct PreviewPane: View {
     @ObservedObject var viewModel: RecoveryViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Preview")
                 .font(.headline)
 
             previewContent
                 .frame(maxWidth: .infinity)
                 .frame(height: 220)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
 
             if viewModel.previewImage != nil {
                 Text("Click the image to view it full size")
@@ -897,15 +1156,64 @@ private struct MetadataRow: View {
     }
 }
 
+/// Shown when the scan found items but the active visibility filter hides all
+/// of them. The Recovered case matters most: recovered files reappear only
+/// when a scan re-finds them, which depends on the media types selected — an
+/// Images-only scan will never re-find recovered videos.
+private struct EmptyFilterExplanation: View {
+    let visibility: RecoveredVisibility
+
+    private var message: (icon: String, title: String, detail: String) {
+        switch visibility {
+        case .all:
+            ("line.3.horizontal.decrease.circle", "No results match",
+             "The filename filter hides every result.")
+        case .unrecovered:
+            ("checkmark.circle", "Nothing new here",
+             "Every result is recovered, skipped, or marked as recovered elsewhere.")
+        case .marked:
+            ("checklist.unchecked", "Nothing marked for recovery",
+             "Tick files to queue them, then review the queue here before recovering.")
+        case .recovered:
+            ("clock.arrow.circlepath", "No recovered files in this scan",
+             "Recovered files appear here only when a scan finds them again — "
+             + "and a scan only looks for the media types selected in the sidebar. "
+             + "Files recovered under other types (for example videos, during an "
+             + "images-only scan) stay in the history and reappear when their "
+             + "types are selected.")
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: message.icon)
+                .font(.system(size: 44))
+                .foregroundStyle(.secondary)
+            Text(message.title)
+                .font(.title3.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(message.detail)
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct EmptyResultsView: View {
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 54))
                 .foregroundStyle(.secondary)
             Text("No media found")
                 .font(.title3.weight(.medium))
                 .foregroundStyle(.secondary)
+            Text("Choose a drive, pick the media types to look for, and scan.")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

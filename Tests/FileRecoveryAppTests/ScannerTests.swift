@@ -314,3 +314,83 @@ private func be32(_ value: UInt32) -> [UInt8] {
         #expect(items.allSatisfy { !$0.isDuplicate })
     }
 }
+
+@Suite struct FastScanTests {
+    /// A structurally valid JPEG is still recovered in fast mode — fast only
+    /// drops the brute-force fallback, not the structural parser.
+    @Test func fastScanStillFindsValidJPEG() async throws {
+        var jpeg: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+        jpeg += [UInt8](repeating: 0x11, count: 14)
+        jpeg += [0xFF, 0xDA, 0x00, 0x08] + [UInt8](repeating: 0x01, count: 6)
+        jpeg += [0x37, 0xFF, 0x00, 0x42]
+        jpeg += [0xFF, 0xD9]
+
+        var blob = [UInt8](repeating: 0xAA, count: 64)
+        blob += jpeg
+        blob += [UInt8](repeating: 0xAA, count: 64)
+
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        var scanner = RecoveryScanner()
+        scanner.fastScan = true
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+
+        let item = try #require(items.first { $0.byteOffset == 64 })
+        #expect(item.byteLength == UInt64(jpeg.count))
+    }
+
+    /// A JPEG header with no valid segment structure and no EOI: thorough mode
+    /// would scan forward for FFD9; fast mode drops it, so nothing is emitted.
+    @Test func fastScanSkipsUnstructuredHeader() async throws {
+        // FFD8FF then bytes with no valid marker structure and no FFD9 anywhere.
+        var blob: [UInt8] = [0xFF, 0xD8, 0xFF, 0x42]
+        for i in 0..<4096 {
+            let b = UInt8((i * 7 + 3) % 251)
+            if b != 0xD9 && b != 0xFF { blob.append(b) }
+        }
+
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        var scanner = RecoveryScanner()
+        scanner.fastScan = true
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+
+        #expect(items.isEmpty)
+    }
+}
+
+@Suite struct SignatureTableTests {
+    /// The starter table gates which bytes reach detect(). If a format's first
+    /// byte is missing, that format silently stops being found — so every kind
+    /// must contribute at least one starter, and carving must still work with
+    /// every kind selected (covered by carvesSyntheticBlob).
+    @Test func everyKindHasAStarter() {
+        for kind in MediaKind.allCases {
+            let table = RecoveryScanner.signatureStarters(for: [kind])
+            #expect(table.contains(true), "\(kind.rawValue) has no signature starter byte")
+        }
+    }
+
+    /// Selecting nothing must gate everything off rather than scanning blindly.
+    @Test func emptySelectionHasNoStarters() {
+        #expect(!RecoveryScanner.signatureStarters(for: []).contains(true))
+    }
+
+    /// A kind's starters must be a subset of the union — guards against a typo
+    /// adding a byte for one kind that the combined table misses.
+    @Test func unionCoversEveryIndividualKind() {
+        let union = RecoveryScanner.signatureStarters(for: Set(MediaKind.allCases))
+        for kind in MediaKind.allCases {
+            let single = RecoveryScanner.signatureStarters(for: [kind])
+            for index in 0..<256 where single[index] {
+                #expect(union[index], "byte \(index) for \(kind.rawValue) missing from union")
+            }
+        }
+    }
+}

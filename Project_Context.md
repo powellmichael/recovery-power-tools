@@ -12,12 +12,12 @@ All three are met. Phases 2-5 built on top of them.
 
 - GitHub repo: `powellmichael/recovery-power-tools`
 - Default branch: `main`
-- Current working branch: `phase-5-video-preview` (unmerged)
+- Current working branch: `phase-6-enhancements` (no commits yet)
 - Phase history: `ac8650a` phase 1 MVP → `75db2e0` phase 2 (external drives)
   → `6ee5e26` phase 3 (filter/sort/pause) → `4d197dc` phase 4 (NTFS)
-  → phase 5, below
+  → `4e03218` phase 5 (PR #4, merged)
 
-Phase 5 commits (on branch, not yet merged):
+Phase 5 contents:
 
 - `8b4843d` video preview and gallery thumbnails
 - `f64395d` EXIF thumbnail JPEG truncation fix
@@ -25,8 +25,12 @@ Phase 5 commits (on branch, not yet merged):
   NSTableView reentrancy fix
 - `b76ae2d` file list export/import with drive verification
 - `dbf152a` percent complete while scanning
-- `d787a23` project context updated through phase 5
 - `e656892` multi-selection in list and gallery
+- `11efa46` media category row alignment
+
+**Nothing in phase 5 has been field-tested on a real drive.** It builds and
+41 tests pass, but video playback, gallery video thumbnails, EXIF/GPS on real
+photos, and the manifest round-trip have only been exercised synthetically.
 
 ## Architecture
 
@@ -212,6 +216,38 @@ at different x positions.
 
 ## Future Enhancements
 
+### Review state — marking files not to recover (design in progress)
+
+Goal: mark files you don't want, so the working set shows only real
+candidates. The driving case is files **already recovered by other means** —
+something this app can't detect on its own.
+
+Two separable pieces:
+
+- **"Marked" visibility filter** (~10 lines): a fourth option in the All / New
+  / Recovered picker showing only checkbox-selected items. Not a new screen —
+  the same table and gallery, filtered. Satisfies "see only what I want to
+  recover" with no new state. Worth doing first; it may be enough.
+- **Durable review state**: "already recovered elsewhere" is a fact about a
+  file, not a per-session preference. It should survive a rescan the way
+  app-recovered files already do. The recovery checkbox can't carry it — it
+  clears on rescan, and an unchecked box is ambiguous between "no" and
+  "haven't looked yet".
+
+Design calls to settle:
+
+- Prefer **one mutually exclusive review state** (unreviewed / keep / skip)
+  over a separate rejected flag beside the existing checkbox. Two independent
+  booleans give four combinations, one of which ("marked for recovery *and*
+  rejected") is nonsense the UI would have to keep explaining away.
+- Persist per drive, keyed like the recovery log (volume serial + offset +
+  length), but in a **separate file** — `recovered.json` is irreplaceable and
+  was only just hardened; it shouldn't take on a second concern.
+- Probably fold "recovered elsewhere" into the existing Recovered view with a
+  different badge, rather than inventing a fourth filter, since from the user's
+  point of view those files *are* recovered — just not by this tool.
+- Select All should skip skipped items, as it already skips duplicates.
+
 ### Landing page (design in progress)
 
 A launch screen replacing the current straight-to-scan layout: a category
@@ -245,19 +281,22 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
 
 ## Recommended Next Steps
 
-1. **Field-test phase 5** on the NTFS drive: video playback, gallery video
-   thumbnails, EXIF/GPS on real photos, manifest export → replug → import to
-   see how many entries survive a mount. That last number decides whether scan
-   resume is worth building.
-2. **Landing page** once the design settles (see Future Enhancements).
-3. **FAT32 deleted directory entries** for original filenames — the last
+1. **Field-test phase 5** — nothing in it has touched real hardware yet. On the
+   NTFS drive: video playback, gallery video thumbnails, EXIF/GPS on real
+   photos, and manifest export → replug → import to see how many entries
+   survive a mount. That last number decides whether scan resume is worth
+   building at all.
+2. **Review state** — start with the "Marked" filter, then decide on durable
+   skip marking after using it against a real scan (see Future Enhancements).
+3. **Landing page** once the design settles (see Future Enhancements).
+4. **FAT32 deleted directory entries** for original filenames — the last
    filesystem still showing "Not Available". Worth it only if FAT32 volumes
    (SD cards, older USB sticks) are actually in scope. Note this pairs with the
    landing page's SD Card Recovery category: SD cards are typically FAT32, so
    that category is thin without this parser.
-4. **Scan resume** via a cursor in the manifest, if field testing shows
+5. **Scan resume** via a cursor in the manifest, if field testing shows
    manifests survive real-world use.
-5. App icon, signing, Xcode project — only when distribution matters.
+6. App icon, signing, Xcode project — only when distribution matters.
 
 ## Environment Notes
 

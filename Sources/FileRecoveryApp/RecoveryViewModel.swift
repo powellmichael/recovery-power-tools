@@ -9,7 +9,9 @@ import UniformTypeIdentifiers
 final class RecoveryViewModel: ObservableObject {
     @Published var target: ScanTarget?
     @Published var destinationURL: URL?
-    @Published var selectedKinds: Set<MediaKind> = [.jpeg]
+    /// Empty means "every type" at scan time — see effectiveKinds. Nothing is
+    /// checked by default so a scan defaults to finding everything.
+    @Published var selectedKinds: Set<MediaKind> = []
     @Published var items: [RecoveredItem] = []
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
@@ -35,6 +37,15 @@ final class RecoveryViewModel: ObservableObject {
     @Published var zipFileName = ""
     @Published var recoveredVisibility: RecoveredVisibility = .all
     @Published var showClearFilterPrompt = false
+    /// Fast scan: quicker but skips brute-force recovery of damaged files.
+    @Published var fastScan = false
+    /// Recovery-complete prompt, offering to uncheck the files just written.
+    @Published var showRecoveryCompletePrompt = false
+    @Published private(set) var recoveryFailureCount = 0
+    private var justRecoveredIDs: [RecoveredItem.ID] = []
+
+    /// How many files the just-finished recovery wrote — drives the prompt text.
+    var justRecoveredCount: Int { justRecoveredIDs.count }
     @Published var viewMode: ResultsViewMode = .list
     @Published private(set) var thumbnails: [RecoveredItem.ID: NSImage] = [:]
     private var thumbnailsRequested: Set<RecoveredItem.ID> = []
@@ -45,9 +56,19 @@ final class RecoveryViewModel: ObservableObject {
         case .all:
             break
         case .unrecovered:
-            visible = visible.filter { !$0.previouslyRecovered && $0.recoveredURL == nil }
+            // "New" means still needing a decision: not recovered by the app,
+            // not marked skipped or recovered-elsewhere.
+            visible = visible.filter {
+                !$0.previouslyRecovered && $0.recoveredURL == nil && $0.reviewMark == nil
+            }
+        case .marked:
+            visible = visible.filter { selectedRecoveryIDs.contains($0.id) }
         case .recovered:
-            visible = visible.filter { $0.previouslyRecovered || $0.recoveredURL != nil }
+            // Recovered-elsewhere counts: from the user's point of view the
+            // file is recovered, just not by this tool.
+            visible = visible.filter {
+                $0.previouslyRecovered || $0.recoveredURL != nil || $0.reviewMark == .recoveredElsewhere
+            }
         }
         if !filenameFilter.isEmpty {
             visible = visible.filter { $0.displayName.localizedCaseInsensitiveContains(filenameFilter) }
@@ -66,7 +87,8 @@ final class RecoveryViewModel: ObservableObject {
     private var pendingItems: [RecoveredItem] = []
     private var flushScheduled = false
     private var pauseGate: PauseGate?
-    private var recoveryLog = RecoveryLog.load()
+    private var recoveryLog: RecoveryLog
+    private var reviewLog: ReviewLog
     @Published var manifestStatus: String?
     /// Manifest entries whose data no longer matches the drive.
     @Published private(set) var staleReasons: [RecoveredItem.ID: RecoveryManifest.Staleness] = [:]
@@ -84,7 +106,14 @@ final class RecoveryViewModel: ObservableObject {
     }
     private let scanner = RecoveryScanner()
 
-    init() {
+    init(
+        recoveryLogURL: URL = RecoveryLog.defaultURL,
+        reviewLogURL: URL = ReviewLog.defaultURL
+    ) {
+        // Injectable so tests can run the full scan-recover-rescan pipeline
+        // without touching the real history files.
+        recoveryLog = RecoveryLog.load(from: recoveryLogURL)
+        reviewLog = ReviewLog.load(from: reviewLogURL)
         // An unreadable history file is surfaced immediately, not on first save:
         // the user should know tracking is off before they recover anything.
         logWarning = recoveryLog.loadError
@@ -117,7 +146,13 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     var canScan: Bool {
-        target != nil && !isScanActive && state != .recovering && !selectedKinds.isEmpty
+        target != nil && !isScanActive && state != .recovering
+    }
+
+    /// Kinds the scan actually looks for: the selection, or every kind when
+    /// nothing is checked.
+    var effectiveKinds: Set<MediaKind> {
+        selectedKinds.isEmpty ? Set(MediaKind.allCases) : selectedKinds
     }
 
     var canRecover: Bool {
@@ -374,8 +409,10 @@ final class RecoveryViewModel: ObservableObject {
         clearThumbnails()
         state = .scanning
 
-        let scanner = scanner
-        let kinds = selectedKinds
+        var configured = scanner
+        configured.fastScan = fastScan
+        let scanner = configured
+        let kinds = effectiveKinds
         let gate = PauseGate()
         pauseGate = gate
 
@@ -456,10 +493,58 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Found items are NOT auto-selected for recovery: the user picks
     /// explicitly (or uses Select All on a filtered list).
+    /// Everything ever recovered from the current volume, whatever media type.
+    /// The Recovered chip shows it so an off-type scan reads as "0 of 2,248
+    /// in this scan" rather than looking like lost history.
+    var volumeHistoryCount: Int {
+        guard currentVolumeID != 0 else { return 0 }
+        return recoveryLog.count(withPrefix: "v\(currentVolumeID):")
+    }
+
+    /// Test hook: records items as recovered exactly the way a real recovery
+    /// does — same key scheme, same save path.
+    func recordRecoveredForTesting(_ ids: Set<RecoveredItem.ID>) {
+        for index in items.indices where ids.contains(items[index].id) {
+            recoveryLog.record(logKey(for: items[index]))
+        }
+        recoveryLog.save()
+    }
+
+    /// Test hook: what the scan pipeline stamps onto each found item.
+    func stampForTesting(_ item: RecoveredItem) -> RecoveredItem {
+        markedIfPreviouslyRecovered(item)
+    }
+
+    /// Test hook: the volume component of history keys.
+    func setVolumeIDForTesting(_ id: UInt64) {
+        currentVolumeID = id
+    }
+
     private func markedIfPreviouslyRecovered(_ item: RecoveredItem) -> RecoveredItem {
         var item = item
-        item.previouslyRecovered = recoveryLog.contains(logKey(for: item))
+        let key = logKey(for: item)
+        item.previouslyRecovered = recoveryLog.contains(key)
+        item.reviewMark = reviewLog.mark(for: key)
         return item
+    }
+
+    /// Applies or clears a durable review mark on the given items and persists
+    /// it, so the judgement survives a rescan of the same volume.
+    func setReviewMark(_ mark: ReviewMark?, ids: Set<RecoveredItem.ID>) {
+        for index in items.indices where ids.contains(items[index].id) {
+            items[index].reviewMark = mark
+            reviewLog.set(mark, for: logKey(for: items[index]))
+            // A skipped file shouldn't stay queued for recovery.
+            if mark != nil {
+                selectedRecoveryIDs.remove(items[index].id)
+            }
+        }
+        logWarning = reviewLog.save()
+    }
+
+    /// How many of the given items carry this mark — drives menu titles.
+    func markCount(_ mark: ReviewMark, in ids: Set<RecoveredItem.ID>) -> Int {
+        items.count { ids.contains($0.id) && $0.reviewMark == mark }
     }
 
     private func flushPendingItems() {
@@ -678,7 +763,7 @@ final class RecoveryViewModel: ObservableObject {
     func selectAllForRecovery() {
         selectedRecoveryIDs.formUnion(
             filteredItems.lazy
-                .filter { !$0.isDuplicate && self.staleReasons[$0.id] == nil }
+                .filter { !$0.isDuplicate && $0.reviewMark == nil && self.staleReasons[$0.id] == nil }
                 .map(\.id)
         )
     }
@@ -772,25 +857,42 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     private func applyRecoveryOutcomes(_ outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)], clearZipNameOnSuccess: Bool = false) {
-        var recordedAny = false
+        var recovered: [RecoveredItem.ID] = []
+        var failed = 0
         for outcome in outcomes {
             guard let index = items.firstIndex(where: { $0.id == outcome.id }) else { continue }
             if let url = outcome.url {
                 items[index].recoveredURL = url
                 items[index].recoveryError = nil
                 recoveryLog.record(logKey(for: items[index]))
-                recordedAny = true
+                recovered.append(outcome.id)
             } else {
                 items[index].recoveryError = outcome.error
+                failed += 1
             }
         }
-        if recordedAny {
+        if !recovered.isEmpty {
             logWarning = recoveryLog.save()
             if clearZipNameOnSuccess {
                 zipFileName = ""
             }
+            justRecoveredIDs = recovered
+            recoveryFailureCount = failed
+            showRecoveryCompletePrompt = true
         }
         state = .finished
+    }
+
+    /// Test hook: stage a set as the just-recovered files.
+    func stageJustRecoveredForTesting(_ ids: [RecoveredItem.ID]) {
+        justRecoveredIDs = ids
+    }
+
+    /// The completion prompt's "Uncheck" action: clears just the files this
+    /// recovery wrote, leaving any other checked files queued.
+    func uncheckRecoveredFiles() {
+        selectedRecoveryIDs.subtract(justRecoveredIDs)
+        justRecoveredIDs = []
     }
 
     func clearPreview() {

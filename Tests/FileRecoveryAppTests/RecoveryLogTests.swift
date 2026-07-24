@@ -72,6 +72,21 @@ private func tempLogURL() -> URL {
         #expect(final.contains("v1:new:entry"))
     }
 
+    @Test func countsKeysByVolumePrefix() throws {
+        let url = tempLogURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var log = RecoveryLog.load(from: url)
+        log.record("v111:1:1")
+        log.record("v111:2:2")
+        log.record("v222:3:3")
+
+        #expect(log.count(withPrefix: "v111:") == 2)
+        #expect(log.count(withPrefix: "v222:") == 1)
+        // "v1:" must not match "v111:..." keys — the colon is the boundary.
+        #expect(log.count(withPrefix: "v1:") == 0)
+    }
+
     /// The real log format is a JSON array of strings; decoding must keep
     /// working against a file written by the previous version.
     @Test func readsExistingArrayFormat() throws {
@@ -85,6 +100,58 @@ private func tempLogURL() -> URL {
         let log = RecoveryLog.load(from: url)
         #expect(log.isReadable)
         #expect(log.contains("v1744734114:44730810368:5465768"))
+    }
+}
+
+@Suite struct ReviewLogTests {
+    private func tempURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("review-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("review.json")
+    }
+
+    @Test func roundTripsMarks() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var log = ReviewLog.load(from: url)
+        log.set(.skipped, for: "v1:100:200")
+        log.set(.recoveredElsewhere, for: "v1:300:400")
+        #expect(log.save() == nil)
+
+        let reloaded = ReviewLog.load(from: url)
+        #expect(reloaded.mark(for: "v1:100:200") == .skipped)
+        #expect(reloaded.mark(for: "v1:300:400") == .recoveredElsewhere)
+        #expect(reloaded.mark(for: "v1:999:999") == nil)
+    }
+
+    @Test func clearingAMarkRemovesIt() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var log = ReviewLog.load(from: url)
+        log.set(.skipped, for: "v1:100:200")
+        log.set(nil, for: "v1:100:200")
+        #expect(log.save() == nil)
+        #expect(ReviewLog.load(from: url).mark(for: "v1:100:200") == nil)
+    }
+
+    /// Same data-loss guard as RecoveryLog: corrupt file never reads as empty.
+    @Test func corruptFileBlocksSave() throws {
+        let url = tempURL()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let corrupt = Data("{broken".utf8)
+        try corrupt.write(to: url)
+
+        var log = ReviewLog.load(from: url)
+        #expect(!log.isReadable)
+        log.set(.skipped, for: "v1:1:1")
+        #expect(log.save() != nil)
+        #expect(try Data(contentsOf: url) == corrupt)
     }
 }
 
@@ -209,5 +276,176 @@ private func tempLogURL() -> URL {
 
         viewModel.toggleSelection(items[2])
         #expect(viewModel.tableSelection == [items[0].id])
+    }
+}
+
+@MainActor
+@Suite struct ReviewMarkFilteringTests {
+    private func viewModelWithItems(_ count: Int) async throws -> (RecoveryViewModel, [RecoveredItem]) {
+        var blob: [UInt8] = []
+        for index in 0..<count {
+            blob += [UInt8](repeating: 0xAA, count: 32)
+            blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+            blob += [UInt8](repeating: UInt8(index &+ 1), count: 100)
+            blob += [0xFF, 0xD9]
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("review-vm-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+        let viewModel = RecoveryViewModel()
+        viewModel.items = items
+        return (viewModel, items)
+    }
+
+    /// "New" means still needing a decision — marked files drop out.
+    @Test func newHidesSkippedAndElsewhere() async throws {
+        let (viewModel, items) = try await viewModelWithItems(3)
+        try #require(items.count == 3)
+
+        viewModel.items[0].reviewMark = .skipped
+        viewModel.items[1].reviewMark = .recoveredElsewhere
+        viewModel.recoveredVisibility = .unrecovered
+
+        #expect(viewModel.filteredItems.map(\.id) == [items[2].id])
+    }
+
+    /// "Recovered elsewhere" is recovered from the user's point of view.
+    @Test func recoveredViewIncludesElsewhere() async throws {
+        let (viewModel, items) = try await viewModelWithItems(3)
+        viewModel.items[1].reviewMark = .recoveredElsewhere
+        viewModel.recoveredVisibility = .recovered
+
+        #expect(viewModel.filteredItems.map(\.id) == [items[1].id])
+    }
+
+    /// "Marked" shows exactly the recovery queue.
+    @Test func markedShowsOnlyCheckedItems() async throws {
+        let (viewModel, items) = try await viewModelWithItems(3)
+        viewModel.setSelectedForRecovery(items[2], isSelected: true)
+        viewModel.recoveredVisibility = .marked
+
+        #expect(viewModel.filteredItems.map(\.id) == [items[2].id])
+    }
+
+    /// Select All must not queue files the user chose to skip.
+    @Test func selectAllExcludesReviewMarked() async throws {
+        let (viewModel, items) = try await viewModelWithItems(4)
+        viewModel.items[0].reviewMark = .skipped
+        viewModel.items[1].reviewMark = .recoveredElsewhere
+
+        viewModel.selectAllForRecovery()
+
+        #expect(viewModel.selectedRecoveryIDs == Set([items[2].id, items[3].id]))
+    }
+}
+
+@MainActor
+@Suite struct RecoveredAcrossSessionsTests {
+    /// The full round trip the user depends on: scan, recover, relaunch,
+    /// rescan the same source — the item must come back flagged.
+    @Test func rescanShowsPreviouslyRecovered() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 64)
+        blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10] + [UInt8](repeating: 0x42, count: 200) + [0xFF, 0xD9]
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-test-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-logs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: logDir) }
+        let recoveryURL = logDir.appendingPathComponent("recovered.json")
+        let reviewURL = logDir.appendingPathComponent("review.json")
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let scanner = RecoveryScanner()
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+        try #require(items.count == 1)
+
+        // Session 1: recover, with a device-style volume ID in play.
+        let first = RecoveryViewModel(recoveryLogURL: recoveryURL, reviewLogURL: reviewURL)
+        first.setVolumeIDForTesting(1_744_734_114)
+        first.items = items
+        first.recordRecoveredForTesting([items[0].id])
+
+        // Session 2: fresh view model (fresh log load), same volume, rescan.
+        let rescan = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+        let second = RecoveryViewModel(recoveryLogURL: recoveryURL, reviewLogURL: reviewURL)
+        second.setVolumeIDForTesting(1_744_734_114)
+        let stamped = rescan.map { second.stampForTesting($0) }
+
+        let allFlagged = stamped.allSatisfy(\.previouslyRecovered)
+        #expect(allFlagged)
+    }
+
+    /// Same round trip but the second session's volume ID differs — keys must
+    /// not match, because offsets on a different volume mean different data.
+    @Test func differentVolumeDoesNotMatch() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 64)
+        blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10] + [UInt8](repeating: 0x42, count: 200) + [0xFF, 0xD9]
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-test-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-logs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: logDir) }
+        let recoveryURL = logDir.appendingPathComponent("recovered.json")
+        let reviewURL = logDir.appendingPathComponent("review.json")
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let scanner = RecoveryScanner()
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+
+        let first = RecoveryViewModel(recoveryLogURL: recoveryURL, reviewLogURL: reviewURL)
+        first.setVolumeIDForTesting(1_744_734_114)
+        first.items = items
+        first.recordRecoveredForTesting([items[0].id])
+
+        let second = RecoveryViewModel(recoveryLogURL: recoveryURL, reviewLogURL: reviewURL)
+        second.setVolumeIDForTesting(0)
+        let stamped = items.map { second.stampForTesting($0) }
+
+        #expect(!stamped[0].previouslyRecovered)
+    }
+}
+
+@MainActor
+@Suite struct EffectiveKindsTests {
+    @Test func emptySelectionMeansEveryKind() {
+        let vm = RecoveryViewModel()
+        #expect(vm.selectedKinds.isEmpty)
+        #expect(vm.effectiveKinds == Set(MediaKind.allCases))
+    }
+
+    @Test func selectionIsUsedVerbatimWhenNonEmpty() {
+        let vm = RecoveryViewModel()
+        vm.selectedKinds = [.jpeg, .png]
+        #expect(vm.effectiveKinds == [.jpeg, .png])
+    }
+}
+
+@MainActor
+@Suite struct RecoveryCompletePromptTests {
+    /// Unchecking after recovery clears only the recovered files, leaving other
+    /// queued files selected.
+    @Test func uncheckClearsOnlyRecoveredFiles() {
+        let a = UUID(), b = UUID(), c = UUID()
+        let vm = RecoveryViewModel()
+        vm.selectedRecoveryIDs = [a, b, c]
+
+        vm.stageJustRecoveredForTesting([a, b])
+        vm.uncheckRecoveredFiles()
+
+        #expect(vm.selectedRecoveryIDs == [c])
     }
 }
