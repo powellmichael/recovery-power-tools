@@ -449,3 +449,87 @@ private func tempLogURL() -> URL {
         #expect(vm.selectedRecoveryIDs == [c])
     }
 }
+
+/// filteredItems is cached and invalidated by a didSet on each of its inputs.
+/// A missed invalidation shows stale rows with no error, so every input gets
+/// pinned here — including the one that is deliberately conditional.
+@MainActor
+@Suite struct FilteredCacheTests {
+    private func viewModel(_ count: Int) async throws -> (RecoveryViewModel, [RecoveredItem]) {
+        var blob: [UInt8] = []
+        for index in 0..<count {
+            blob += [UInt8](repeating: 0xAA, count: 32)
+            blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+            blob += [UInt8](repeating: UInt8(index &+ 1), count: 100)
+            blob += [0xFF, 0xD9]
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("filtercache-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.items = items
+        return (model, items)
+    }
+
+    @Test func appendingItemsInvalidates() async throws {
+        let (model, items) = try await viewModel(3)
+        #expect(model.filteredItems.count == 3)
+        model.items.append(items[0])
+        #expect(model.filteredItems.count == 4)
+    }
+
+    @Test func filenameFilterInvalidates() async throws {
+        let (model, _) = try await viewModel(3)
+        #expect(model.filteredItems.count == 3)
+        model.filenameFilter = "no-such-file-anywhere"
+        #expect(model.filteredItems.isEmpty)
+        model.filenameFilter = ""
+        #expect(model.filteredItems.count == 3)
+    }
+
+    @Test func visibilityInvalidates() async throws {
+        let (model, items) = try await viewModel(3)
+        model.setSelectedForRecovery(items[0], isSelected: true)
+        #expect(model.filteredItems.count == 3)
+        model.recoveredVisibility = .marked
+        #expect(model.filteredItems.count == 1)
+    }
+
+    /// The conditional invalidation: checking a box only changes the visible
+    /// rows in the Marked view, and must still be picked up there.
+    @Test func checkingABoxInvalidatesOnlyInMarkedView() async throws {
+        let (model, items) = try await viewModel(3)
+        model.recoveredVisibility = .marked
+        #expect(model.filteredItems.isEmpty)
+
+        model.setSelectedForRecovery(items[0], isSelected: true)
+        #expect(model.filteredItems.count == 1)
+        model.setSelectedForRecovery(items[1], isSelected: true)
+        #expect(model.filteredItems.count == 2)
+        model.setSelectedForRecovery(items[0], isSelected: false)
+        #expect(model.filteredItems.count == 1)
+    }
+
+    @Test func sortOrderInvalidates() async throws {
+        let (model, _) = try await viewModel(3)
+        let ascending = model.filteredItems.map(\.byteOffset)
+        model.sortOrder = [KeyPathComparator(\RecoveredItem.byteOffset, order: .reverse)]
+        #expect(model.filteredItems.map(\.byteOffset) == ascending.reversed())
+    }
+
+    /// Review marks live on the items themselves, so an element-wise mutation
+    /// has to invalidate too — a subscript assignment still fires didSet.
+    @Test func reviewMarkInvalidates() async throws {
+        let (model, items) = try await viewModel(3)
+        model.recoveredVisibility = .unrecovered
+        #expect(model.filteredItems.count == 3)
+        model.setReviewMark(.skipped, ids: [items[0].id])
+        #expect(model.filteredItems.count == 2)
+    }
+}

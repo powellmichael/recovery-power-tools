@@ -64,6 +64,15 @@ final class ScanSource: @unchecked Sendable {
         let skip = offset - start
         guard available > skip else { return Data() }
         let take = min(want, available - skip)
+        // Block-aligned reads — every 4 MB scan chunk, and every read of a
+        // regular file — need nothing trimmed from the front, so hand the
+        // buffer back instead of paying a full copy through subdata.
+        guard skip > 0 else {
+            if take < UInt64(buffer.count) {
+                buffer.removeSubrange(Int(take)..<buffer.count)
+            }
+            return buffer
+        }
         return buffer.subdata(in: Int(skip)..<Int(skip + take))
     }
 

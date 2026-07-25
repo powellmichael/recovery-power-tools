@@ -165,7 +165,9 @@ struct RecoveryScanner: Sendable {
         let regionEnd = region.range.upperBound
         var items: [RecoveredItem] = []
         var cursor = region.range.lowerBound
-        var carry = Data()
+        // Kept as bytes, not Data: the scan buffer used to be built as Data and
+        // then converted to [UInt8] for every chunk, copying 4 MB twice per read.
+        var carry: [UInt8] = []
         var lastReport = Date.distantPast
         // Candidates arrive in ascending start order — findCandidates only walks
         // forward, and each chunk's search starts exactly where the last one
@@ -181,7 +183,7 @@ struct RecoveryScanner: Sendable {
             let isLast = chunk.isEmpty || cursor + UInt64(chunk.count) >= regionEnd
 
             var buffer = carry
-            buffer.append(chunk)
+            buffer.append(contentsOf: chunk)
             let baseOffset = cursor - UInt64(carry.count)
             let searchLimit = isLast ? buffer.count : max(0, buffer.count - overlapSize)
 
@@ -206,7 +208,7 @@ struct RecoveryScanner: Sendable {
 
             cursor += UInt64(chunk.count)
             if isLast { break }
-            carry = buffer.suffix(min(overlapSize, buffer.count))
+            carry = Array(buffer.suffix(min(overlapSize, buffer.count)))
 
             // Throttle: on fast drives per-chunk reporting floods the UI.
             if Date().timeIntervalSince(lastReport) >= 0.25 {
@@ -268,7 +270,7 @@ struct RecoveryScanner: Sendable {
     }
 
     private func findCandidates(
-        in data: Data,
+        in bytes: [UInt8],
         source: ScanSource,
         regionEnd: UInt64,
         baseOffset: UInt64,
@@ -277,7 +279,6 @@ struct RecoveryScanner: Sendable {
         deletedFiles: [UInt64: DeletedFileEntry]
     ) throws -> [RecoveredItem] {
         var results: [RecoveredItem] = []
-        let bytes = [UInt8](data)
         guard !bytes.isEmpty else { return [] }
 
         // Only a dozen byte values can begin any signature, so skip the rest

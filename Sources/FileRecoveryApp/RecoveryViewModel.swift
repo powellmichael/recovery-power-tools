@@ -12,7 +12,7 @@ final class RecoveryViewModel: ObservableObject {
     /// Empty means "every type" at scan time — see effectiveKinds. Nothing is
     /// checked by default so a scan defaults to finding everything.
     @Published var selectedKinds: Set<MediaKind> = []
-    @Published var items: [RecoveredItem] = []
+    @Published var items: [RecoveredItem] = [] { didSet { filteredCache = nil } }
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
     @Published var selectedItemID: RecoveredItem.ID?
@@ -21,7 +21,12 @@ final class RecoveryViewModel: ObservableObject {
     @Published var tableSelection: Set<RecoveredItem.ID> = []
     /// Where a shift-click range starts. Set by a plain or command click.
     private var selectionAnchorID: RecoveredItem.ID?
-    @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = []
+    /// Only the "Marked" view filters on this, so ticking a checkbox in any
+    /// other view must not throw the filtered list away — that happens once per
+    /// click while bulk-selecting.
+    @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = [] {
+        didSet { if recoveredVisibility == .marked { filteredCache = nil } }
+    }
     @Published var previewImage: NSImage?
     @Published var previewPlayer: AVPlayer?
     @Published var previewMetadata = ImageMetadata()
@@ -29,13 +34,13 @@ final class RecoveryViewModel: ObservableObject {
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
     @Published var scanNote: String?
-    @Published var filenameFilter = ""
-    @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = []
+    @Published var filenameFilter = "" { didSet { filteredCache = nil } }
+    @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = [] { didSet { filteredCache = nil } }
     @Published var isPreviewPaneVisible = false
     @Published var showFullSizePreview = false
     @Published var saveAsZip = false
     @Published var zipFileName = ""
-    @Published var recoveredVisibility: RecoveredVisibility = .all
+    @Published var recoveredVisibility: RecoveredVisibility = .all { didSet { filteredCache = nil } }
     @Published var showClearFilterPrompt = false
     /// Fast scan: quicker but skips brute-force recovery of damaged files.
     @Published var fastScan = false
@@ -50,7 +55,21 @@ final class RecoveryViewModel: ObservableObject {
     @Published private(set) var thumbnails: [RecoveredItem.ID: NSImage] = [:]
     private var thumbnailsRequested: Set<RecoveredItem.ID> = []
 
+    /// Cleared by the didSet on every input below. Nil means "recompute".
+    private var filteredCache: [RecoveredItem]?
+
+    /// SwiftUI reads this several times per render pass, and so do the arrow
+    /// keys, shift-click and Select All. Recomputing meant re-filtering and
+    /// re-sorting the whole result set each time, so the cached value is what
+    /// keeps a large scan navigable.
     var filteredItems: [RecoveredItem] {
+        if let filteredCache { return filteredCache }
+        let computed = computeFilteredItems()
+        filteredCache = computed
+        return computed
+    }
+
+    private func computeFilteredItems() -> [RecoveredItem] {
         var visible = items
         switch recoveredVisibility {
         case .all:
