@@ -533,3 +533,71 @@ private func tempLogURL() -> URL {
         #expect(model.filteredItems.count == 2)
     }
 }
+
+/// The scan timer. Formatting is pure and fully pinned; the clock behaviour is
+/// tested through the start/stop transitions rather than by sleeping.
+@MainActor
+@Suite struct ScanTimerTests {
+    @Test func formatsSecondsMinutesAndHours() {
+        #expect(RecoveryViewModel.elapsedLabel(0) == "0s")
+        #expect(RecoveryViewModel.elapsedLabel(45) == "45s")
+        #expect(RecoveryViewModel.elapsedLabel(60) == "1m 00s")
+        #expect(RecoveryViewModel.elapsedLabel(192) == "3m 12s")
+        #expect(RecoveryViewModel.elapsedLabel(3600) == "1h 00m")
+        #expect(RecoveryViewModel.elapsedLabel(7620) == "2h 07m")
+        #expect(RecoveryViewModel.elapsedLabel(64_800) == "18h 00m")
+    }
+
+    /// Negative input can't happen through the UI, but the formatter should not
+    /// produce "-1s" if a clock ever runs backwards.
+    @Test func clampsNegativeInput() {
+        #expect(RecoveryViewModel.elapsedLabel(-5) == "0s")
+    }
+
+    @Test func noLabelBeforeAnyScan() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        #expect(model.elapsedScanLabel == nil)
+        #expect(model.scanStartedAt == nil)
+    }
+
+    /// A stopped clock must be frozen, not merely slow: two reads with work in
+    /// between have to be identical, or a finished scan's duration would creep.
+    @Test func stoppedClockIsFrozen() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+
+        let first = model.elapsedScanTime
+        var churn = 0
+        for i in 0..<200_000 { churn &+= i }
+        #expect(churn > 0)
+        #expect(model.elapsedScanTime == first)
+        #expect(model.scanStartedAt == nil)
+        // It ran, so the label stays available for the finished state.
+        #expect(model.elapsedScanLabel != nil)
+    }
+
+    /// Resuming after a pause must not restart the total from zero.
+    @Test func resumingKeepsBankedTime() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        let banked = model.elapsedScanTime
+
+        model.startScanClock(resetTotal: false)
+        #expect(model.elapsedScanTime >= banked)
+        #expect(model.scanStartedAt != nil)
+    }
+
+    /// Starting a fresh scan does reset it.
+    @Test func newScanResetsTheTotal() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        // A reset scan's elapsed time is bounded by this test's own runtime.
+        #expect(model.elapsedScanTime < 5)
+    }
+}

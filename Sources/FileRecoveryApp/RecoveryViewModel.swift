@@ -98,6 +98,46 @@ final class RecoveryViewModel: ObservableObject {
         return visible
     }
 
+    /// When the running segment of the current scan started, or nil when the
+    /// clock is stopped. Paused time is deliberately excluded — "how long has
+    /// this been running" shouldn't keep climbing while the user has it
+    /// deliberately halted, and a pause can last hours.
+    @Published private(set) var scanStartedAt: Date?
+    /// Time banked from earlier segments of the same scan, before each pause.
+    private var bankedScanTime: TimeInterval = 0
+
+    var elapsedScanTime: TimeInterval {
+        bankedScanTime + (scanStartedAt.map { Date().timeIntervalSince($0) } ?? 0)
+    }
+
+    /// Nil until a scan has run, so the UI shows nothing on a fresh launch.
+    /// Survives completion on purpose: "that took 3h 12m" is worth keeping.
+    var elapsedScanLabel: String? {
+        guard scanStartedAt != nil || bankedScanTime > 0 else { return nil }
+        return Self.elapsedLabel(elapsedScanTime)
+    }
+
+    /// Compact and fixed-width-ish so a ticking clock doesn't jitter the layout.
+    static func elapsedLabel(_ seconds: TimeInterval) -> String {
+        let total = Int(max(0, seconds))
+        let hours = total / 3600, minutes = (total % 3600) / 60, secs = total % 60
+        if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
+        if minutes > 0 { return String(format: "%dm %02ds", minutes, secs) }
+        return "\(secs)s"
+    }
+
+    /// Internal rather than private so tests can drive the clock without
+    /// running a real scan against a real device.
+    func startScanClock(resetTotal: Bool) {
+        if resetTotal { bankedScanTime = 0 }
+        scanStartedAt = Date()
+    }
+
+    func stopScanClock() {
+        bankedScanTime = elapsedScanTime
+        scanStartedAt = nil
+    }
+
     private var scanTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
     /// Defers preview work out of NSTableView's selection delegate; separate
@@ -240,6 +280,9 @@ final class RecoveryViewModel: ObservableObject {
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
+        // A new drive means the previous scan's duration no longer applies.
+        bankedScanTime = 0
+        scanStartedAt = nil
         state = .idle
     }
 
@@ -310,6 +353,7 @@ final class RecoveryViewModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         state = .scanning
+        startScanClock(resetTotal: true)
         manifestStatus = "Verifying against the drive…"
 
         let scanner = scanner
@@ -327,9 +371,13 @@ final class RecoveryViewModel: ObservableObject {
                 try Task.checkCancellation()
                 await MainActor.run { self?.applyImported(verified, manifest: manifest) }
             } catch is CancellationError {
-                await MainActor.run { self?.state = .idle }
+                await MainActor.run {
+                    self?.stopScanClock()
+                    self?.state = .idle
+                }
             } catch {
                 await MainActor.run {
+                    self?.stopScanClock()
                     self?.state = .failed(error.localizedDescription)
                     self?.manifestStatus = nil
                 }
@@ -362,6 +410,7 @@ final class RecoveryViewModel: ObservableObject {
         manifestStatus = stale == 0
             ? "All \(items.count) entries verified against the drive."
             : "\(recoverable) of \(items.count) entries still match the drive; \(stale) changed and can't be recovered."
+        stopScanClock()
         state = .finished
     }
 
@@ -430,6 +479,7 @@ final class RecoveryViewModel: ObservableObject {
         scanNote = nil
         clearThumbnails()
         state = .scanning
+        startScanClock(resetTotal: true)
 
         var configured = scanner
         configured.fastScan = fastScan
@@ -468,12 +518,19 @@ final class RecoveryViewModel: ObservableObject {
                     let existingIDs = Set(self.items.map(\.id))
                     let missing = found.filter { !existingIDs.contains($0.id) }.map { self.markedIfPreviouslyRecovered($0) }
                     self.items.append(contentsOf: missing)
+                    self.stopScanClock()
                     self.state = .finished
                 }
             } catch is CancellationError {
-                await MainActor.run { self?.state = .idle }
+                await MainActor.run {
+                    self?.stopScanClock()
+                    self?.state = .idle
+                }
             } catch {
-                await MainActor.run { self?.state = .failed(error.localizedDescription) }
+                await MainActor.run {
+                    self?.stopScanClock()
+                    self?.state = .failed(error.localizedDescription)
+                }
             }
         }
     }
@@ -483,6 +540,7 @@ final class RecoveryViewModel: ObservableObject {
         scanTask = nil
         pauseGate = nil
         flushPendingItems()
+        stopScanClock()
         state = .idle
     }
 
@@ -490,9 +548,13 @@ final class RecoveryViewModel: ObservableObject {
         switch state {
         case .scanning:
             pauseGate?.setPaused(true)
+            stopScanClock()
             state = .paused
         case .paused:
             pauseGate?.setPaused(false)
+            // Resume without resetting: the banked time from before the pause
+            // carries forward, so the total stays the whole scan's running time.
+            startScanClock(resetTotal: false)
             state = .scanning
         default:
             break
