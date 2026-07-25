@@ -216,6 +216,36 @@ at different x positions.
 
 ## Future Enhancements
 
+### Split jpegSearchCap into a walk budget and a fallback budget (not started)
+
+`jpegSearchCap` (RecoveryScanner.swift:29) is used for two unrelated jobs, and
+one value has to serve both:
+
+- **RecoveryScanner.swift:391** — how far the brute-force `FFD9` search scans.
+  It reads every byte, so this is the expensive one: a false `FFD8FF` with no
+  `FFD9` ahead of it burns the full 256 MB.
+- **RecoveryScanner.swift:635** — the limit for `jpegLength`'s segment walk.
+  Cheap, because it hops by each segment's declared length instead of reading
+  every byte.
+
+Because both paths `return nil` past `limit`, the cap is also **the largest
+JPEG the app can recover** — an oversized file is dropped entirely, not
+truncated. That is why the 16 MB fast-scan cap costs real recoveries: it sits
+below DSLR JPEGs and panoramas.
+
+Proposal: keep the walk generous (256 MB or `maxCarveSize`) and give the
+fallback its own budget of 8-16 MB. The fallback only runs when a file is
+damaged enough that its segment structure won't parse, and a damaged JPEG's
+recoverable content is near the front anyway. Expected 16-32x bound on the
+worst case with no change to the size ceiling for intact files.
+
+Unmeasured — reasoned from the code only. Needs its own benchmark before
+landing, unlike the marker gate, whose 5.6x was measured. Note also that the
+pathological case may be rarer on real drives than a synthetic benchmark
+suggests: long zero runs contain no `FF` bytes and so generate no false
+headers at all. The bad combination is a false `FFD8FF` in random-looking
+data followed by a long stretch with no `FFD9` — a used/blank boundary.
+
 ### Review state — marking files not to recover (design in progress)
 
 Goal: mark files you don't want, so the working set shows only real
