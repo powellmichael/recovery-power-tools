@@ -98,6 +98,55 @@ final class RecoveryViewModel: ObservableObject {
         return visible
     }
 
+    /// What a finished scan found. Deliberately a frozen snapshot rather than
+    /// live counts: it describes the scan that just completed, and recomputing
+    /// four passes over 200k items on every render is exactly the cost the
+    /// filtered-list cache exists to avoid.
+    struct ScanSummary: Equatable, Sendable {
+        var duration: TimeInterval
+        var found: Int
+        var duplicates: Int
+        var alreadyRecovered: Int
+        var new: Int
+    }
+
+    /// Non-nil from the end of a scan until dismissed or the next scan starts.
+    @Published var scanSummary: ScanSummary?
+
+    static func summarize(_ items: [RecoveredItem], duration: TimeInterval) -> ScanSummary {
+        var duplicates = 0, alreadyRecovered = 0, new = 0
+        for item in items {
+            if item.isDuplicate { duplicates += 1 }
+            // Matches the Recovered view: recovered-elsewhere counts, because
+            // from the user's point of view the file is already saved.
+            if item.previouslyRecovered || item.recoveredURL != nil || item.reviewMark == .recoveredElsewhere {
+                alreadyRecovered += 1
+            } else if item.reviewMark == nil {
+                new += 1
+            }
+        }
+        return ScanSummary(
+            duration: duration,
+            found: items.count,
+            duplicates: duplicates,
+            alreadyRecovered: alreadyRecovered,
+            new: new
+        )
+    }
+
+    func dismissScanSummary() {
+        scanSummary = nil
+    }
+
+    /// A scan runs for an hour or more, so the user is rarely watching when it
+    /// ends. requestUserAttention bounces the dock icon until the app is
+    /// focused. A Notification Centre banner would be better, but that needs a
+    /// bundle identifier and this ships as a bare SwiftPM executable.
+    private func announceCompletion() {
+        guard !NSApp.isActive else { return }
+        NSApp.requestUserAttention(.criticalRequest)
+    }
+
     /// When the running segment of the current scan started, or nil when the
     /// clock is stopped. Paused time is deliberately excluded — "how long has
     /// this been running" shouldn't keep climbing while the user has it
@@ -280,9 +329,11 @@ final class RecoveryViewModel: ObservableObject {
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
-        // A new drive means the previous scan's duration no longer applies.
+        // A new drive means the previous scan's duration and counts no
+        // longer apply.
         bankedScanTime = 0
         scanStartedAt = nil
+        scanSummary = nil
         state = .idle
     }
 
@@ -478,6 +529,7 @@ final class RecoveryViewModel: ObservableObject {
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
+        scanSummary = nil
         state = .scanning
         startScanClock(resetTotal: true)
 
@@ -519,9 +571,12 @@ final class RecoveryViewModel: ObservableObject {
                     let missing = found.filter { !existingIDs.contains($0.id) }.map { self.markedIfPreviouslyRecovered($0) }
                     self.items.append(contentsOf: missing)
                     self.stopScanClock()
+                    self.scanSummary = Self.summarize(self.items, duration: self.elapsedScanTime)
                     self.state = .finished
+                    self.announceCompletion()
                 }
             } catch is CancellationError {
+                // No bounce and no summary: the user cancelled, so they know.
                 await MainActor.run {
                     self?.stopScanClock()
                     self?.state = .idle
@@ -530,6 +585,7 @@ final class RecoveryViewModel: ObservableObject {
                 await MainActor.run {
                     self?.stopScanClock()
                     self?.state = .failed(error.localizedDescription)
+                    self?.announceCompletion()
                 }
             }
         }

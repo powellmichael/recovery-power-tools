@@ -601,3 +601,94 @@ private func tempLogURL() -> URL {
         #expect(model.elapsedScanTime < 5)
     }
 }
+
+/// The scan-completion summary. Counts are a frozen snapshot, and the
+/// categories have to agree with the filters the bar's buttons jump to,
+/// otherwise clicking "12 new" would show a different number of rows.
+@MainActor
+@Suite struct ScanSummaryTests {
+    private func item(
+        offset: UInt64,
+        duplicate: Bool = false,
+        previouslyRecovered: Bool = false,
+        mark: ReviewMark? = nil,
+        recoveredURL: URL? = nil
+    ) throws -> RecoveredItem {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summary-\(UUID().uuidString).bin")
+        try Data([0xFF, 0xD8, 0xFF, 0xE0]).write(to: url)
+        var item = RecoveredItem(
+            kind: .jpeg,
+            source: try ScanSource(fileURL: url),
+            byteOffset: offset,
+            byteLength: 100,
+            fileExtension: "jpg",
+            originalFilename: nil
+        )
+        item.isDuplicate = duplicate
+        item.previouslyRecovered = previouslyRecovered
+        item.reviewMark = mark
+        item.recoveredURL = recoveredURL
+        return item
+    }
+
+    @Test func countsEachCategory() throws {
+        let items = [
+            try item(offset: 0),
+            try item(offset: 1),
+            try item(offset: 2, duplicate: true),
+            try item(offset: 3, previouslyRecovered: true),
+            try item(offset: 4, mark: .skipped),
+            try item(offset: 5, mark: .recoveredElsewhere),
+        ]
+        let summary = RecoveryViewModel.summarize(items, duration: 90)
+
+        #expect(summary.found == 6)
+        #expect(summary.duplicates == 1)
+        // previouslyRecovered plus recoveredElsewhere.
+        #expect(summary.alreadyRecovered == 2)
+        // Two plain ones plus the duplicate; skipped and both recovered are out.
+        #expect(summary.new == 3)
+        #expect(summary.duration == 90)
+    }
+
+    /// The summary's "new" must match what the New view actually lists, or the
+    /// button lies about how many rows it will show.
+    @Test func newMatchesTheUnrecoveredFilter() async throws {
+        let items = [
+            try item(offset: 0),
+            try item(offset: 1, previouslyRecovered: true),
+            try item(offset: 2, mark: .skipped),
+            try item(offset: 3, mark: .recoveredElsewhere),
+            try item(offset: 4, duplicate: true),
+        ]
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.items = items
+
+        let summary = RecoveryViewModel.summarize(items, duration: 0)
+        model.recoveredVisibility = .unrecovered
+        #expect(model.filteredItems.count == summary.new)
+
+        model.recoveredVisibility = .recovered
+        #expect(model.filteredItems.count == summary.alreadyRecovered)
+
+        model.recoveredVisibility = .all
+        #expect(model.filteredItems.count == summary.found)
+    }
+
+    @Test func emptyScanSummarisesToZeroes() {
+        let summary = RecoveryViewModel.summarize([], duration: 12)
+        #expect(summary.found == 0)
+        #expect(summary.new == 0)
+        #expect(summary.alreadyRecovered == 0)
+        #expect(summary.duplicates == 0)
+    }
+
+    @Test func dismissClearsIt() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.scanSummary = RecoveryViewModel.summarize([], duration: 5)
+        #expect(model.scanSummary != nil)
+        model.dismissScanSummary()
+        #expect(model.scanSummary == nil)
+    }
+}
