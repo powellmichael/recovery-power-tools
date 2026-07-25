@@ -300,7 +300,15 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
 
 ## Environment Notes
 
-- Run with `swift run`. `FileRecoveryApp.init()` calls
+- **Always run a release build: `make run` (or `swift run -c release`).**
+  `swift run` and `swift build` default to debug, and the carver is a tight
+  per-byte loop — exactly the shape Swift's `-Onone` leaves unoptimized.
+  Measured on 256 MB of high-entropy data: **31 MB/s debug vs 667 MB/s
+  release, a ~21x difference.** An 18-hour scan that stalled at 69% was a
+  debug build, not a slow algorithm. A `Makefile` wraps this so the fast path
+  is the default one; `make test` stays in debug on purpose, to keep
+  assertions and overflow checks on.
+- Run with `make run`. `FileRecoveryApp.init()` calls
   `setActivationPolicy(.regular)` and `activate(ignoringOtherApps:)` because a
   bare SwiftPM executable launches as a background process that never
   activates — without it the window shows but receives no key events.

@@ -118,6 +118,9 @@ final class RecoveryViewModel: ObservableObject {
         // the user should know tracking is off before they recover anything.
         logWarning = recoveryLog.loadError
 
+        // Sweeps full-size previews left behind if a previous run crashed.
+        Self.purgePreviewCache()
+
         // SwiftUI's Table focus and bare-key shortcuts are both unreliable on
         // macOS; an AppKit event monitor always sees arrow keys.
         // ponytail: monitor lives for the app's lifetime, never removed —
@@ -581,7 +584,7 @@ final class RecoveryViewModel: ObservableObject {
         let scanner = scanner
         let itemID = item.id
         Task.detached(priority: .utility) { [weak self] in
-            let url = Self.previewURL(for: item)
+            let url = Self.thumbnailURL(for: item)
             defer { try? FileManager.default.removeItem(at: url) }
             try? scanner.write(item, to: url)
             // NSImage isn't Sendable, so hand back PNG bytes and build the
@@ -669,10 +672,7 @@ final class RecoveryViewModel: ObservableObject {
             setSelectedForRecovery(item, isSelected: isSelected)
             return
         }
-        for id in tableSelection {
-            guard let match = items.first(where: { $0.id == id }) else { continue }
-            setSelectedForRecovery(match, isSelected: isSelected)
-        }
+        setSelectedForRecovery(ids: tableSelection, isSelected: isSelected)
     }
 
     /// Command-click: add or remove one item without disturbing the rest.
@@ -704,9 +704,11 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Context-menu action over whatever rows are highlighted.
     func setSelectedForRecovery(ids: Set<RecoveredItem.ID>, isSelected: Bool) {
-        for id in ids {
-            guard let match = items.first(where: { $0.id == id }) else { continue }
-            setSelectedForRecovery(match, isSelected: isSelected)
+        // One pass over items to drop ids that aren't in the current results,
+        // rather than a linear scan per id — that was O(items x selection), so
+        // ticking a 10k-row range stalled the main actor.
+        for id in Set(items.lazy.map(\.id)).intersection(ids) {
+            setSelectedForRecovery(id: id, isSelected: isSelected)
         }
     }
 
@@ -745,13 +747,17 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func setSelectedForRecovery(_ item: RecoveredItem, isSelected: Bool) {
+        setSelectedForRecovery(id: item.id, isSelected: isSelected)
+    }
+
+    private func setSelectedForRecovery(id: RecoveredItem.ID, isSelected: Bool) {
         // A stale manifest entry's bytes are gone; recovering it would write
         // whatever now occupies that offset.
-        guard staleReasons[item.id] == nil else { return }
+        guard staleReasons[id] == nil else { return }
         if isSelected {
-            selectedRecoveryIDs.insert(item.id)
+            selectedRecoveryIDs.insert(id)
         } else {
-            selectedRecoveryIDs.remove(item.id)
+            selectedRecoveryIDs.remove(id)
         }
     }
 
@@ -859,8 +865,15 @@ final class RecoveryViewModel: ObservableObject {
     private func applyRecoveryOutcomes(_ outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)], clearZipNameOnSuccess: Bool = false) {
         var recovered: [RecoveredItem.ID] = []
         var failed = 0
+        // Built once: a firstIndex scan per outcome is O(items x recovered), so
+        // recovering thousands of files out of a large scan froze the UI at the
+        // worst moment. uniquingKeysWith keeps firstIndex's "earliest wins".
+        let indexByID = Dictionary(
+            items.enumerated().map { ($1.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         for outcome in outcomes {
-            guard let index = items.firstIndex(where: { $0.id == outcome.id }) else { continue }
+            guard let index = indexByID[outcome.id] else { continue }
             if let url = outcome.url {
                 items[index].recoveredURL = url
                 items[index].recoveryError = nil
@@ -949,6 +962,9 @@ final class RecoveryViewModel: ObservableObject {
     private func preparePreview(for item: RecoveredItem) {
         previewTask?.cancel()
         clearPreview()
+        // clearPreview released the player and image, so the previous carve on
+        // disk has no reader left. Drop it before writing the next one.
+        Self.purgePreviewCache()
 
         let isVideo = item.kind.isVideoPreviewable
         guard item.kind.isPreviewable || isVideo else { return }
@@ -992,9 +1008,28 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    private nonisolated static let previewDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FileRecoveryPreviews", isDirectory: true)
+
+    /// Thumbnails get their own directory: they're written and deleted by
+    /// detached tasks, so purging the preview cache must not race them.
+    private nonisolated static let thumbnailDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FileRecoveryThumbnails", isDirectory: true)
+
     private nonisolated static func previewURL(for item: RecoveredItem) -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("FileRecoveryPreviews", isDirectory: true)
-            .appendingPathComponent("\(item.id.uuidString).\(item.fileExtension)")
+        previewDirectory.appendingPathComponent("\(item.id.uuidString).\(item.fileExtension)")
+    }
+
+    private nonisolated static func thumbnailURL(for item: RecoveredItem) -> URL {
+        thumbnailDirectory.appendingPathComponent("\(item.id.uuidString).\(item.fileExtension)")
+    }
+
+    /// Previews are full-size carves — a 2 GB video preview is a 2 GB temp file.
+    /// Nothing deleted them, so browsing a long list filled the temp directory
+    /// with a copy of every file the user clicked. Cleared whenever a new
+    /// preview starts (the old one has already been torn down by clearPreview)
+    /// and at launch, which also sweeps leftovers from a previous session.
+    private nonisolated static func purgePreviewCache() {
+        try? FileManager.default.removeItem(at: previewDirectory)
     }
 }

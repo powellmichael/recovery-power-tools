@@ -167,6 +167,12 @@ struct RecoveryScanner: Sendable {
         var cursor = region.range.lowerBound
         var carry = Data()
         var lastReport = Date.distantPast
+        // Candidates arrive in ascending start order — findCandidates only walks
+        // forward, and each chunk's search starts exactly where the last one
+        // stopped. So "does this overlap anything already found?" is answered by
+        // one comparison against the furthest end so far, instead of a scan over
+        // every item found so far. That scan was O(n²) across a whole drive.
+        var furthestItemEnd = region.range.lowerBound
 
         while cursor < regionEnd {
             try await waitIfPaused(pauseGate)
@@ -188,11 +194,12 @@ struct RecoveryScanner: Sendable {
                 selectedKinds: selectedKinds,
                 deletedFiles: deletedFiles
             ) {
-                guard !overlapsExisting(candidate, in: items),
+                guard candidate.byteOffset >= furthestItemEnd,
                       !overlapsExisting(candidate, in: claimed) else { continue }
                 var candidate = candidate
                 candidate.fingerprint = fingerprint(for: candidate)
                 candidate.isDuplicate = tracker.markSeen(candidate.fingerprint)
+                furthestItemEnd = max(furthestItemEnd, candidate.byteOffset + candidate.byteLength)
                 items.append(candidate)
                 await itemFound(candidate)
             }
