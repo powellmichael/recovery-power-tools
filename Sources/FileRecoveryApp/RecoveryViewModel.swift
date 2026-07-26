@@ -175,16 +175,46 @@ final class RecoveryViewModel: ObservableObject {
         return "\(secs)s"
     }
 
+    /// Power-management assertion held while a scan is actually running.
+    ///
+    /// Without it macOS App Nap is free to throttle the process once the app
+    /// stops being frontmost: it lowers CPU priority, coalesces timers and
+    /// demotes disk I/O to a background tier. Locking the screen during a real
+    /// 842 GB scan roughly halved throughput for the locked hour. A scan that
+    /// runs unattended for hours is the exact case App Nap should not touch.
+    ///
+    /// `.userInitiated` already implies `.idleSystemSleepDisabled`, so this
+    /// also stops the system idle-sleeping mid-scan. Display sleep is left
+    /// alone — the screen going dark is fine and saves power.
+    private var scanActivity: NSObjectProtocol?
+
+    /// Test seam: whether the assertion is currently held.
+    var isHoldingScanActivity: Bool { scanActivity != nil }
+
     /// Internal rather than private so tests can drive the clock without
     /// running a real scan against a real device.
+    ///
+    /// The power assertion is tied to the clock deliberately: the clock runs
+    /// exactly when the scan does (it stops on pause and at every exit path),
+    /// so binding them here means the two can never drift out of step.
     func startScanClock(resetTotal: Bool) {
         if resetTotal { bankedScanTime = 0 }
         scanStartedAt = Date()
+        if scanActivity == nil {
+            scanActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated],
+                reason: "Scanning a drive for recoverable files"
+            )
+        }
     }
 
     func stopScanClock() {
         bankedScanTime = elapsedScanTime
         scanStartedAt = nil
+        if let scanActivity {
+            ProcessInfo.processInfo.endActivity(scanActivity)
+            self.scanActivity = nil
+        }
     }
 
     private var scanTask: Task<Void, Never>?
@@ -330,9 +360,10 @@ final class RecoveryViewModel: ObservableObject {
         scanNote = nil
         clearThumbnails()
         // A new drive means the previous scan's duration and counts no
-        // longer apply.
+        // longer apply. Go through stopScanClock so the power assertion is
+        // released rather than leaked if a scan was still running.
+        stopScanClock()
         bankedScanTime = 0
-        scanStartedAt = nil
         scanSummary = nil
         state = .idle
     }

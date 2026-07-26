@@ -692,3 +692,56 @@ private func tempLogURL() -> URL {
         #expect(model.scanSummary == nil)
     }
 }
+
+/// The App Nap assertion. It can't be observed directly, so these pin the
+/// thing that actually goes wrong: an unbalanced begin/end, which either
+/// leaves the machine unable to idle-sleep forever or drops the protection
+/// mid-scan.
+@MainActor
+@Suite struct ScanActivityTests {
+    private func model() -> RecoveryViewModel {
+        RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+    }
+
+    @Test func notHeldBeforeAScan() {
+        #expect(model().isHoldingScanActivity == false)
+    }
+
+    @Test func heldWhileRunningAndReleasedAtTheEnd() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        #expect(model.isHoldingScanActivity)
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+    }
+
+    /// Pause releases it — a paused scan is doing no work, so holding the
+    /// machine awake would be wrong — and resuming takes it again.
+    @Test func releasedOnPauseAndRetakenOnResume() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+        model.startScanClock(resetTotal: false)
+        #expect(model.isHoldingScanActivity)
+        model.stopScanClock()
+    }
+
+    /// Starting twice without an intervening stop must not take a second
+    /// token, or the first would be leaked and never ended.
+    @Test func doubleStartDoesNotLeakAToken() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        model.startScanClock(resetTotal: false)
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+    }
+
+    @Test func doubleStopIsHarmless() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+    }
+}
