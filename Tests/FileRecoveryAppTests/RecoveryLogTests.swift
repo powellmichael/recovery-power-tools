@@ -745,3 +745,95 @@ private func tempLogURL() -> URL {
         #expect(model.isHoldingScanActivity == false)
     }
 }
+
+/// Recovery holds its own power assertion. Driven end to end through a real
+/// recovery, because the release lives on the completion path and a unit test
+/// of the token alone would not prove that path runs.
+@MainActor
+@Suite struct RecoveryActivityTests {
+    private func modelWithItems() async throws -> (RecoveryViewModel, [RecoveredItem], URL) {
+        var blob: [UInt8] = []
+        for index in 0..<3 {
+            blob += [UInt8](repeating: 0xAA, count: 32)
+            blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+            blob += [UInt8](repeating: UInt8(index &+ 1), count: 100)
+            blob += [0xFF, 0xD9]
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recovery-activity-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recovery-out-\(UUID().uuidString)", isDirectory: true)
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.items = items
+        model.destinationURL = destination
+        return (model, items, destination)
+    }
+
+    /// Waits for the recovery task to report back, rather than sleeping a fixed
+    /// amount and hoping.
+    private func waitForFinish(_ model: RecoveryViewModel) async throws {
+        for _ in 0..<200 where model.state != .finished {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
+    @Test func notHeldBeforeRecovery() async throws {
+        let (model, _, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+        #expect(model.isHoldingRecoveryActivity == false)
+    }
+
+    @Test func releasedAfterRecoveryCompletes() async throws {
+        let (model, items, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+        try #require(items.count == 3)
+
+        model.selectedRecoveryIDs = Set(items.map(\.id))
+        model.recoverSelected()
+        #expect(model.isHoldingRecoveryActivity, "held for the duration of the write")
+
+        try await waitForFinish(model)
+        #expect(model.state == .finished)
+        #expect(model.isHoldingRecoveryActivity == false, "released on the completion path")
+        // The files really were written, so the completion path genuinely ran.
+        #expect(model.items.count { $0.recoveredURL != nil } == 3)
+    }
+
+    /// A recovery refused for writing onto the source disk must not take the
+    /// token at all — it never reaches the completion path that releases it.
+    @Test func refusedRecoveryNeverTakesIt() async throws {
+        let (model, items, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        model.destinationURL = nil
+        model.selectedRecoveryIDs = Set(items.map(\.id))
+        model.recoverSelected()
+        #expect(model.isHoldingRecoveryActivity == false)
+    }
+
+    /// Scan and recovery tokens are independent — releasing one must not
+    /// release the other.
+    @Test func scanAndRecoveryTokensAreIndependent() async throws {
+        let (model, items, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        model.startScanClock(resetTotal: true)
+        model.selectedRecoveryIDs = Set(items.map(\.id))
+        model.recoverSelected()
+        #expect(model.isHoldingScanActivity)
+        #expect(model.isHoldingRecoveryActivity)
+
+        try await waitForFinish(model)
+        #expect(model.isHoldingRecoveryActivity == false)
+        #expect(model.isHoldingScanActivity, "the scan's token must survive a recovery")
+        model.stopScanClock()
+    }
+}

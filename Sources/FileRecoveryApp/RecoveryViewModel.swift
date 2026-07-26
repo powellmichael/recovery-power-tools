@@ -187,9 +187,26 @@ final class RecoveryViewModel: ObservableObject {
     /// also stops the system idle-sleeping mid-scan. Display sleep is left
     /// alone — the screen going dark is fine and saves power.
     private var scanActivity: NSObjectProtocol?
+    /// Recovery gets its own token: writing 150k files runs for hours too, and
+    /// it can start while no scan is running, so it can't share the scan's.
+    private var recoveryActivity: NSObjectProtocol?
 
-    /// Test seam: whether the assertion is currently held.
+    /// Test seams: whether each assertion is currently held.
     var isHoldingScanActivity: Bool { scanActivity != nil }
+    var isHoldingRecoveryActivity: Bool { recoveryActivity != nil }
+
+    /// Idempotent on both sides — taking twice must not strand the first token,
+    /// and releasing twice must be harmless, because the callers are spread
+    /// across pause, cancel and three error paths.
+    private func takeActivity(_ token: inout NSObjectProtocol?, reason: String) {
+        guard token == nil else { return }
+        token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: reason)
+    }
+
+    private func releaseActivity(_ token: inout NSObjectProtocol?) {
+        if let token { ProcessInfo.processInfo.endActivity(token) }
+        token = nil
+    }
 
     /// Internal rather than private so tests can drive the clock without
     /// running a real scan against a real device.
@@ -200,21 +217,13 @@ final class RecoveryViewModel: ObservableObject {
     func startScanClock(resetTotal: Bool) {
         if resetTotal { bankedScanTime = 0 }
         scanStartedAt = Date()
-        if scanActivity == nil {
-            scanActivity = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiated],
-                reason: "Scanning a drive for recoverable files"
-            )
-        }
+        takeActivity(&scanActivity, reason: "Scanning a drive for recoverable files")
     }
 
     func stopScanClock() {
         bankedScanTime = elapsedScanTime
         scanStartedAt = nil
-        if let scanActivity {
-            ProcessInfo.processInfo.endActivity(scanActivity)
-            self.scanActivity = nil
-        }
+        releaseActivity(&scanActivity)
     }
 
     private var scanTask: Task<Void, Never>?
@@ -958,6 +967,9 @@ final class RecoveryViewModel: ObservableObject {
             return
         }
         state = .recovering
+        // Taken after the guard above, so a refused recovery doesn't hold it.
+        // Released in applyRecoveryOutcomes, which every path reaches.
+        takeActivity(&recoveryActivity, reason: "Writing recovered files to disk")
 
         let scanner = scanner
         let selected = items.filter { selectedRecoveryIDs.contains($0.id) }
@@ -1031,6 +1043,7 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     private func applyRecoveryOutcomes(_ outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)], clearZipNameOnSuccess: Bool = false) {
+        releaseActivity(&recoveryActivity)
         var recovered: [RecoveredItem.ID] = []
         var failed = 0
         // Built once: a firstIndex scan per outcome is O(items x recovered), so
