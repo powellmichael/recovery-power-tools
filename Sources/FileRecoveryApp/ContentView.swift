@@ -46,6 +46,9 @@ struct ContentView: View {
             if viewModel.target == nil {
                 SourceSelectionView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
                     .transition(.opacity)
+            } else if viewModel.isScanActive {
+                ScanningView(viewModel: viewModel)
+                    .transition(.opacity)
             } else {
                 NavigationSplitView {
                     Sidebar(viewModel: viewModel)
@@ -57,6 +60,7 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: viewModel.target == nil)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.isScanActive)
         .sheet(isPresented: Binding(
             get: { viewModel.showFullSizePreview && viewModel.previewImage != nil },
             set: { viewModel.showFullSizePreview = $0 }
@@ -212,20 +216,6 @@ private struct Sidebar: View {
                         }
                     }
 
-                    SidebarCard(title: "Destination") {
-                        PathRow(
-                            label: viewModel.destinationURL?.lastPathComponent,
-                            placeholder: "No destination selected",
-                            systemImage: "folder"
-                        )
-                        Button {
-                            viewModel.chooseDestination()
-                        } label: {
-                            Label("Choose Folder", systemImage: "folder")
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-
                     SidebarCard(title: "Media") {
                         MediaPresetSelector(viewModel: viewModel)
                     }
@@ -276,31 +266,12 @@ private struct Sidebar: View {
                         Button {
                             viewModel.recoverSelected()
                         } label: {
-                            Label("Recover", systemImage: "arrow.down.doc")
+                            Label("Recover Selected…", systemImage: "arrow.down.doc")
                                 .frame(maxWidth: .infinity)
                         }
                         .disabled(!viewModel.canRecover)
+                        .help("Choose a destination and recover the selected files")
 
-                        if viewModel.isScanActive {
-                            HStack(spacing: 6) {
-                                Button {
-                                    viewModel.togglePause()
-                                } label: {
-                                    Label(
-                                        viewModel.state == .paused ? "Resume" : "Pause",
-                                        systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
-                                    )
-                                    .frame(maxWidth: .infinity)
-                                }
-
-                                Button {
-                                    viewModel.cancelScan()
-                                } label: {
-                                    Label("Cancel", systemImage: "xmark.circle")
-                                        .frame(maxWidth: .infinity)
-                                }
-                            }
-                        }
                     }
 
                     SidebarCard(title: "File List") {

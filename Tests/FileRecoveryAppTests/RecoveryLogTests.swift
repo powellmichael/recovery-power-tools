@@ -839,7 +839,7 @@ private func tempLogURL() -> URL {
         try #require(items.count == 3)
 
         model.selectedRecoveryIDs = Set(items.map(\.id))
-        model.recoverSelected()
+        model.recoverSelected(to: destination)
         #expect(model.isHoldingRecoveryActivity, "held for the duration of the write")
 
         try await waitForFinish(model)
@@ -849,15 +849,16 @@ private func tempLogURL() -> URL {
         #expect(model.items.count { $0.recoveredURL != nil } == 3)
     }
 
-    /// A recovery refused for writing onto the source disk must not take the
-    /// token at all — it never reaches the completion path that releases it.
-    @Test func refusedRecoveryNeverTakesIt() async throws {
+    /// Cancelling the destination picker never reaches the write pipeline, so
+    /// it must not take a power assertion that would then have no release path.
+    @Test func cancelledDestinationNeverTakesIt() async throws {
         let (model, items, destination) = try await modelWithItems()
         defer { try? FileManager.default.removeItem(at: destination) }
 
         model.destinationURL = nil
         model.selectedRecoveryIDs = Set(items.map(\.id))
-        model.recoverSelected()
+        #expect(model.canRecover, "destination is chosen by the Recover action now")
+        model.recoverSelected(to: nil)
         #expect(model.isHoldingRecoveryActivity == false)
     }
 
@@ -869,7 +870,7 @@ private func tempLogURL() -> URL {
 
         model.startScanClock(resetTotal: true)
         model.selectedRecoveryIDs = Set(items.map(\.id))
-        model.recoverSelected()
+        model.recoverSelected(to: destination)
         #expect(model.isHoldingScanActivity)
         #expect(model.isHoldingRecoveryActivity)
 

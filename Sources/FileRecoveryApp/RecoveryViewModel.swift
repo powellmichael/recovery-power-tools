@@ -310,7 +310,11 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     var canRecover: Bool {
-        destinationURL != nil && !selectedRecoveryIDs.isEmpty && !isScanActive && state != .recovering
+        !selectedRecoveryIDs.isEmpty && !isScanActive && state != .recovering
+    }
+
+    var canPauseScan: Bool {
+        pauseGate != nil && isScanActive
     }
 
     /// Warns when the user picked a folder on an external drive: folder scans
@@ -324,7 +328,7 @@ final class RecoveryViewModel: ObservableObject {
     var sourceLabel: String? {
         switch target {
         case .path(let url): url.lastPathComponent
-        case .device(let device): device.displayName
+        case .device(let device): device.userFacingName
         case nil: nil
         }
     }
@@ -390,7 +394,7 @@ final class RecoveryViewModel: ObservableObject {
         thumbnailsRequested = []
     }
 
-    func chooseDestination() {
+    private func chooseDestination() -> URL? {
         let panel = NSOpenPanel()
         panel.title = "Choose Recovery Destination"
         panel.canChooseDirectories = true
@@ -399,9 +403,8 @@ final class RecoveryViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
 
-        if panel.runModal() == .OK {
-            destinationURL = panel.url
-        }
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     // MARK: - Manifests
@@ -634,6 +637,7 @@ final class RecoveryViewModel: ObservableObject {
                     let existingIDs = Set(self.items.map(\.id))
                     let missing = found.filter { !existingIDs.contains($0.id) }.map { self.markedIfPreviouslyRecovered($0) }
                     self.items.append(contentsOf: missing)
+                    self.pauseGate = nil
                     self.stopScanClock()
                     self.scanSummary = Self.summarize(self.items, duration: self.elapsedScanTime)
                     self.state = .finished
@@ -642,11 +646,13 @@ final class RecoveryViewModel: ObservableObject {
             } catch is CancellationError {
                 // No bounce and no summary: the user cancelled, so they know.
                 await MainActor.run {
+                    self?.pauseGate = nil
                     self?.stopScanClock()
                     self?.state = .idle
                 }
             } catch {
                 await MainActor.run {
+                    self?.pauseGate = nil
                     self?.stopScanClock()
                     self?.state = .failed(error.localizedDescription)
                     self?.announceCompletion()
@@ -984,7 +990,15 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func recoverSelected() {
-        guard let destinationURL else { return }
+        guard canRecover else { return }
+        recoverSelected(to: chooseDestination())
+    }
+
+    /// Explicit destination path keeps the write pipeline independently
+    /// testable while the user-facing action always asks where to save.
+    func recoverSelected(to chosenDestination: URL?) {
+        guard canRecover, let destinationURL = chosenDestination else { return }
+        self.destinationURL = destinationURL
         if case .device(let device) = target,
            DeviceDiscovery.destination(destinationURL, isOnSameDiskAs: device) {
             state = .failed(RecoveryError.destinationOnSourceDisk.localizedDescription)

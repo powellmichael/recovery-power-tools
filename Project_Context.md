@@ -134,8 +134,9 @@ than per byte, and there the filesystem has already said a file started there.
 
 **Recovery**
 
-- Recover selected files to a chosen folder, optionally as a named ZIP
-  (`ditto -c -k --norsrc`).
+- Recover selected files, optionally as a named ZIP (`ditto -c -k --norsrc`).
+  The destination is requested when Recover Selected is clicked instead of
+  occupying permanent sidebar space before there is anything to recover.
 - Pause/resume mid-scan; cancel.
 - Recovery history persists across scans (volume serial + offset + length),
   so repeat scans show what was already recovered. The Recovered chip also
@@ -156,6 +157,10 @@ than per byte, and there the filesystem has already said a file started there.
 
 **Scan progress and completion**
 
+- A dedicated full-window scan state replaces the configuration/results
+  workspace while work is active. It shows percent, bytes, elapsed time, live
+  files found, the media preset and scan mode, with focused Pause/Resume and
+  Stop controls. Stopping requires confirmation and keeps partial findings.
 - Percent complete, bytes scanned, and elapsed time during a scan. Paused time
   is excluded from the timer, and the total survives completion so a finished
   scan still reports how long it took.
@@ -372,8 +377,8 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
    items were junk. Unverified: it needs eyes on recovered files.
 3. **Exercise Select All and a bulk recovery** at ~200k results. Those paths
    are O(items + selection) now, but that has never been run at this scale.
-4. **Continue the landing-page workflow redesign** with the dedicated scan
-   progress state and results-toolbar cleanup.
+4. **Continue the workflow redesign** with the results-toolbar and recovery
+   action-bar cleanup.
 5. **FAT32 deleted directory entries** for original filenames — the last
    filesystem still showing "Not Available". Worth it only if FAT32 volumes
    (SD cards, older USB sticks) are actually in scope. Note this pairs with the
