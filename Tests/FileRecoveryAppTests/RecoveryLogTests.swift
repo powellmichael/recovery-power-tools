@@ -449,3 +449,391 @@ private func tempLogURL() -> URL {
         #expect(vm.selectedRecoveryIDs == [c])
     }
 }
+
+/// filteredItems is cached and invalidated by a didSet on each of its inputs.
+/// A missed invalidation shows stale rows with no error, so every input gets
+/// pinned here — including the one that is deliberately conditional.
+@MainActor
+@Suite struct FilteredCacheTests {
+    private func viewModel(_ count: Int) async throws -> (RecoveryViewModel, [RecoveredItem]) {
+        var blob: [UInt8] = []
+        for index in 0..<count {
+            blob += [UInt8](repeating: 0xAA, count: 32)
+            blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+            blob += [UInt8](repeating: UInt8(index &+ 1), count: 100)
+            blob += [0xFF, 0xD9]
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("filtercache-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.items = items
+        return (model, items)
+    }
+
+    @Test func appendingItemsInvalidates() async throws {
+        let (model, items) = try await viewModel(3)
+        #expect(model.filteredItems.count == 3)
+        model.items.append(items[0])
+        #expect(model.filteredItems.count == 4)
+    }
+
+    @Test func filenameFilterInvalidates() async throws {
+        let (model, _) = try await viewModel(3)
+        #expect(model.filteredItems.count == 3)
+        model.filenameFilter = "no-such-file-anywhere"
+        #expect(model.filteredItems.isEmpty)
+        model.filenameFilter = ""
+        #expect(model.filteredItems.count == 3)
+    }
+
+    @Test func visibilityInvalidates() async throws {
+        let (model, items) = try await viewModel(3)
+        model.setSelectedForRecovery(items[0], isSelected: true)
+        #expect(model.filteredItems.count == 3)
+        model.recoveredVisibility = .marked
+        #expect(model.filteredItems.count == 1)
+    }
+
+    /// The conditional invalidation: checking a box only changes the visible
+    /// rows in the Marked view, and must still be picked up there.
+    @Test func checkingABoxInvalidatesOnlyInMarkedView() async throws {
+        let (model, items) = try await viewModel(3)
+        model.recoveredVisibility = .marked
+        #expect(model.filteredItems.isEmpty)
+
+        model.setSelectedForRecovery(items[0], isSelected: true)
+        #expect(model.filteredItems.count == 1)
+        model.setSelectedForRecovery(items[1], isSelected: true)
+        #expect(model.filteredItems.count == 2)
+        model.setSelectedForRecovery(items[0], isSelected: false)
+        #expect(model.filteredItems.count == 1)
+    }
+
+    @Test func sortOrderInvalidates() async throws {
+        let (model, _) = try await viewModel(3)
+        let ascending = model.filteredItems.map(\.byteOffset)
+        model.sortOrder = [KeyPathComparator(\RecoveredItem.byteOffset, order: .reverse)]
+        #expect(model.filteredItems.map(\.byteOffset) == ascending.reversed())
+    }
+
+    /// Review marks live on the items themselves, so an element-wise mutation
+    /// has to invalidate too — a subscript assignment still fires didSet.
+    @Test func reviewMarkInvalidates() async throws {
+        let (model, items) = try await viewModel(3)
+        model.recoveredVisibility = .unrecovered
+        #expect(model.filteredItems.count == 3)
+        model.setReviewMark(.skipped, ids: [items[0].id])
+        #expect(model.filteredItems.count == 2)
+    }
+}
+
+/// The scan timer. Formatting is pure and fully pinned; the clock behaviour is
+/// tested through the start/stop transitions rather than by sleeping.
+@MainActor
+@Suite struct ScanTimerTests {
+    @Test func formatsSecondsMinutesAndHours() {
+        #expect(RecoveryViewModel.elapsedLabel(0) == "0s")
+        #expect(RecoveryViewModel.elapsedLabel(45) == "45s")
+        #expect(RecoveryViewModel.elapsedLabel(60) == "1m 00s")
+        #expect(RecoveryViewModel.elapsedLabel(192) == "3m 12s")
+        #expect(RecoveryViewModel.elapsedLabel(3600) == "1h 00m")
+        #expect(RecoveryViewModel.elapsedLabel(7620) == "2h 07m")
+        #expect(RecoveryViewModel.elapsedLabel(64_800) == "18h 00m")
+    }
+
+    /// Negative input can't happen through the UI, but the formatter should not
+    /// produce "-1s" if a clock ever runs backwards.
+    @Test func clampsNegativeInput() {
+        #expect(RecoveryViewModel.elapsedLabel(-5) == "0s")
+    }
+
+    @Test func noLabelBeforeAnyScan() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        #expect(model.elapsedScanLabel == nil)
+        #expect(model.scanStartedAt == nil)
+    }
+
+    /// A stopped clock must be frozen, not merely slow: two reads with work in
+    /// between have to be identical, or a finished scan's duration would creep.
+    @Test func stoppedClockIsFrozen() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+
+        let first = model.elapsedScanTime
+        var churn = 0
+        for i in 0..<200_000 { churn &+= i }
+        #expect(churn > 0)
+        #expect(model.elapsedScanTime == first)
+        #expect(model.scanStartedAt == nil)
+        // It ran, so the label stays available for the finished state.
+        #expect(model.elapsedScanLabel != nil)
+    }
+
+    /// Resuming after a pause must not restart the total from zero.
+    @Test func resumingKeepsBankedTime() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        let banked = model.elapsedScanTime
+
+        model.startScanClock(resetTotal: false)
+        #expect(model.elapsedScanTime >= banked)
+        #expect(model.scanStartedAt != nil)
+    }
+
+    /// Starting a fresh scan does reset it.
+    @Test func newScanResetsTheTotal() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        // A reset scan's elapsed time is bounded by this test's own runtime.
+        #expect(model.elapsedScanTime < 5)
+    }
+}
+
+/// The scan-completion summary. Counts are a frozen snapshot, and the
+/// categories have to agree with the filters the bar's buttons jump to,
+/// otherwise clicking "12 new" would show a different number of rows.
+@MainActor
+@Suite struct ScanSummaryTests {
+    private func item(
+        offset: UInt64,
+        duplicate: Bool = false,
+        previouslyRecovered: Bool = false,
+        mark: ReviewMark? = nil,
+        recoveredURL: URL? = nil
+    ) throws -> RecoveredItem {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summary-\(UUID().uuidString).bin")
+        try Data([0xFF, 0xD8, 0xFF, 0xE0]).write(to: url)
+        var item = RecoveredItem(
+            kind: .jpeg,
+            source: try ScanSource(fileURL: url),
+            byteOffset: offset,
+            byteLength: 100,
+            fileExtension: "jpg",
+            originalFilename: nil
+        )
+        item.isDuplicate = duplicate
+        item.previouslyRecovered = previouslyRecovered
+        item.reviewMark = mark
+        item.recoveredURL = recoveredURL
+        return item
+    }
+
+    @Test func countsEachCategory() throws {
+        let items = [
+            try item(offset: 0),
+            try item(offset: 1),
+            try item(offset: 2, duplicate: true),
+            try item(offset: 3, previouslyRecovered: true),
+            try item(offset: 4, mark: .skipped),
+            try item(offset: 5, mark: .recoveredElsewhere),
+        ]
+        let summary = RecoveryViewModel.summarize(items, duration: 90)
+
+        #expect(summary.found == 6)
+        #expect(summary.duplicates == 1)
+        // previouslyRecovered plus recoveredElsewhere.
+        #expect(summary.alreadyRecovered == 2)
+        // Two plain ones plus the duplicate; skipped and both recovered are out.
+        #expect(summary.new == 3)
+        #expect(summary.duration == 90)
+    }
+
+    /// The summary's "new" must match what the New view actually lists, or the
+    /// button lies about how many rows it will show.
+    @Test func newMatchesTheUnrecoveredFilter() async throws {
+        let items = [
+            try item(offset: 0),
+            try item(offset: 1, previouslyRecovered: true),
+            try item(offset: 2, mark: .skipped),
+            try item(offset: 3, mark: .recoveredElsewhere),
+            try item(offset: 4, duplicate: true),
+        ]
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.items = items
+
+        let summary = RecoveryViewModel.summarize(items, duration: 0)
+        model.recoveredVisibility = .unrecovered
+        #expect(model.filteredItems.count == summary.new)
+
+        model.recoveredVisibility = .recovered
+        #expect(model.filteredItems.count == summary.alreadyRecovered)
+
+        model.recoveredVisibility = .all
+        #expect(model.filteredItems.count == summary.found)
+    }
+
+    @Test func emptyScanSummarisesToZeroes() {
+        let summary = RecoveryViewModel.summarize([], duration: 12)
+        #expect(summary.found == 0)
+        #expect(summary.new == 0)
+        #expect(summary.alreadyRecovered == 0)
+        #expect(summary.duplicates == 0)
+    }
+
+    @Test func dismissClearsIt() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.scanSummary = RecoveryViewModel.summarize([], duration: 5)
+        #expect(model.scanSummary != nil)
+        model.dismissScanSummary()
+        #expect(model.scanSummary == nil)
+    }
+}
+
+/// The App Nap assertion. It can't be observed directly, so these pin the
+/// thing that actually goes wrong: an unbalanced begin/end, which either
+/// leaves the machine unable to idle-sleep forever or drops the protection
+/// mid-scan.
+@MainActor
+@Suite struct ScanActivityTests {
+    private func model() -> RecoveryViewModel {
+        RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+    }
+
+    @Test func notHeldBeforeAScan() {
+        #expect(model().isHoldingScanActivity == false)
+    }
+
+    @Test func heldWhileRunningAndReleasedAtTheEnd() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        #expect(model.isHoldingScanActivity)
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+    }
+
+    /// Pause releases it — a paused scan is doing no work, so holding the
+    /// machine awake would be wrong — and resuming takes it again.
+    @Test func releasedOnPauseAndRetakenOnResume() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+        model.startScanClock(resetTotal: false)
+        #expect(model.isHoldingScanActivity)
+        model.stopScanClock()
+    }
+
+    /// Starting twice without an intervening stop must not take a second
+    /// token, or the first would be leaked and never ended.
+    @Test func doubleStartDoesNotLeakAToken() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        model.startScanClock(resetTotal: false)
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+    }
+
+    @Test func doubleStopIsHarmless() {
+        let model = model()
+        model.startScanClock(resetTotal: true)
+        model.stopScanClock()
+        model.stopScanClock()
+        #expect(model.isHoldingScanActivity == false)
+    }
+}
+
+/// Recovery holds its own power assertion. Driven end to end through a real
+/// recovery, because the release lives on the completion path and a unit test
+/// of the token alone would not prove that path runs.
+@MainActor
+@Suite struct RecoveryActivityTests {
+    private func modelWithItems() async throws -> (RecoveryViewModel, [RecoveredItem], URL) {
+        var blob: [UInt8] = []
+        for index in 0..<3 {
+            blob += [UInt8](repeating: 0xAA, count: 32)
+            blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+            blob += [UInt8](repeating: UInt8(index &+ 1), count: 100)
+            blob += [0xFF, 0xD9]
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recovery-activity-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recovery-out-\(UUID().uuidString)", isDirectory: true)
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.items = items
+        model.destinationURL = destination
+        return (model, items, destination)
+    }
+
+    /// Waits for the recovery task to report back, rather than sleeping a fixed
+    /// amount and hoping.
+    private func waitForFinish(_ model: RecoveryViewModel) async throws {
+        for _ in 0..<200 where model.state != .finished {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
+    @Test func notHeldBeforeRecovery() async throws {
+        let (model, _, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+        #expect(model.isHoldingRecoveryActivity == false)
+    }
+
+    @Test func releasedAfterRecoveryCompletes() async throws {
+        let (model, items, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+        try #require(items.count == 3)
+
+        model.selectedRecoveryIDs = Set(items.map(\.id))
+        model.recoverSelected()
+        #expect(model.isHoldingRecoveryActivity, "held for the duration of the write")
+
+        try await waitForFinish(model)
+        #expect(model.state == .finished)
+        #expect(model.isHoldingRecoveryActivity == false, "released on the completion path")
+        // The files really were written, so the completion path genuinely ran.
+        #expect(model.items.count { $0.recoveredURL != nil } == 3)
+    }
+
+    /// A recovery refused for writing onto the source disk must not take the
+    /// token at all — it never reaches the completion path that releases it.
+    @Test func refusedRecoveryNeverTakesIt() async throws {
+        let (model, items, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        model.destinationURL = nil
+        model.selectedRecoveryIDs = Set(items.map(\.id))
+        model.recoverSelected()
+        #expect(model.isHoldingRecoveryActivity == false)
+    }
+
+    /// Scan and recovery tokens are independent — releasing one must not
+    /// release the other.
+    @Test func scanAndRecoveryTokensAreIndependent() async throws {
+        let (model, items, destination) = try await modelWithItems()
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        model.startScanClock(resetTotal: true)
+        model.selectedRecoveryIDs = Set(items.map(\.id))
+        model.recoverSelected()
+        #expect(model.isHoldingScanActivity)
+        #expect(model.isHoldingRecoveryActivity)
+
+        try await waitForFinish(model)
+        #expect(model.isHoldingRecoveryActivity == false)
+        #expect(model.isHoldingScanActivity, "the scan's token must survive a recovery")
+        model.stopScanClock()
+    }
+}

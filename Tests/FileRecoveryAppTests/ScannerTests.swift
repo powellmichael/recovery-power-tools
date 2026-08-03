@@ -394,3 +394,106 @@ private func be32(_ value: UInt32) -> [UInt8] {
         }
     }
 }
+
+/// The scanner replaced an O(n^2) "does this overlap anything found so far?"
+/// scan with a single comparison against the furthest end seen. That is only
+/// equivalent if candidates always arrive in ascending start order, including
+/// across the 4 MB chunk boundary where a file straddles two reads.
+@Suite struct OverlapInvariantTests {
+    /// Builds a blob larger than one chunk, with a JPEG deliberately straddling
+    /// the boundary, and pins that results stay ordered and never overlap.
+    @Test func resultsAreAscendingAndNonOverlappingAcrossChunks() async throws {
+        let chunkSize = 4 * 1024 * 1024
+        var blob = [UInt8](repeating: 0xAA, count: chunkSize * 2 + 4096)
+
+        func writeJPEG(at offset: Int, payload: Int) {
+            var jpeg: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0]
+            jpeg += [0x00, 0x04, 0x00, 0x00]
+            jpeg += [UInt8](repeating: 0x11, count: payload)
+            jpeg += [0xFF, 0xD9]
+            blob.replaceSubrange(offset..<(offset + jpeg.count), with: jpeg)
+        }
+
+        var offsets = [1024, chunkSize / 2, chunkSize - 20, chunkSize + 5000]
+        offsets.append(chunkSize * 2 - 1000)
+        for offset in offsets { writeJPEG(at: offset, payload: 200) }
+
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(
+            plan: plan,
+            selectedKinds: [.jpeg],
+            progress: { _ in },
+            itemFound: { _ in }
+        )
+
+        // Every planted file is found exactly once — the boundary-straddling one
+        // must not be emitted twice by the carry-buffer rescan.
+        #expect(items.count == offsets.count)
+        #expect(items.map(\.byteOffset) == offsets.map(UInt64.init))
+
+        var previousEnd: UInt64 = 0
+        for item in items {
+            #expect(item.byteOffset >= previousEnd, "item at \(item.byteOffset) overlaps the previous one")
+            previousEnd = item.byteOffset + item.byteLength
+        }
+    }
+}
+
+/// The byte after FFD8FF must be a real JPEG marker. This gates entry to the
+/// end-marker fallback, which scans up to 256 MB per false header, so the
+/// table has to accept everything a genuine JPEG can start with and reject
+/// the rest.
+@Suite struct JPEGMarkerGateTests {
+    /// Carves a blob holding one FFD8FF...FFD9 run whose post-SOI byte is
+    /// `marker`, and reports whether the carver accepted it.
+    private func carves(marker: UInt8) async throws -> Bool {
+        var blob = [UInt8](repeating: 0xAA, count: 64)
+        blob += [0xFF, 0xD8, 0xFF, marker, 0x00, 0x04, 0x00, 0x00]
+        blob += [UInt8](repeating: 0x11, count: 64)
+        blob += [0xFF, 0xD9]
+        blob += [UInt8](repeating: 0xAA, count: 64)
+
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+        return !items.isEmpty
+    }
+
+    /// APP0 and APP1 start almost every real JPEG and JFIF/EXIF file.
+    @Test func acceptsCommonAppMarkers() async throws {
+        #expect(try await carves(marker: 0xE0))
+        #expect(try await carves(marker: 0xE1))
+    }
+
+    /// A quantisation table or bare frame header can legally come first.
+    @Test func acceptsQuantisationAndFrameMarkers() async throws {
+        #expect(try await carves(marker: 0xDB))
+        #expect(try await carves(marker: 0xC0))
+        #expect(try await carves(marker: 0xFE))
+    }
+
+    /// The rejections are the point: these are the values that used to send a
+    /// random FFD8FF into a 256 MB forward scan.
+    @Test func rejectsBytesThatAreNotMarkers() async throws {
+        for marker: UInt8 in [0x00, 0x11, 0xAA, 0x42, 0x7F, 0x99, 0xD8] {
+            #expect(try await carves(marker: marker) == false, "0x\(String(marker, radix: 16)) should not start a JPEG")
+        }
+    }
+
+    /// Guards the table itself against an edit that widens it back out.
+    @Test func tableRejectsMostByteValues() {
+        let allowed = RecoveryScanner.jpegMarkersAfterSOI.filter { $0 }.count
+        #expect(allowed == 37)
+        #expect(!RecoveryScanner.jpegMarkersAfterSOI[0x00])
+        #expect(!RecoveryScanner.jpegMarkersAfterSOI[0xD8]) // a second SOI
+        #expect(RecoveryScanner.jpegMarkersAfterSOI[0xE1])  // EXIF
+    }
+}

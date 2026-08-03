@@ -377,11 +377,33 @@ private struct StatusBlock: View {
         }
     }
 
+    /// Elapsed scan time. Absent until a scan has run, and kept afterwards so
+    /// the finished state still reports how long it took.
+    @ViewBuilder private var elapsedText: some View {
+        if let elapsed = viewModel.elapsedScanLabel {
+            Text(elapsed)
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .help("Time spent scanning. Paused time is not counted.")
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Label(stateLabel.0, systemImage: stateLabel.1)
                     .font(.callout.weight(.medium))
+                // Only the running clock needs a per-second redraw, and
+                // TimelineView keeps that redraw local to this label instead of
+                // republishing the whole view model once a second.
+                if viewModel.scanStartedAt != nil {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        elapsedText
+                    }
+                } else {
+                    elapsedText
+                }
                 Spacer()
                 if let percent = viewModel.progress.percentLabel, viewModel.progress.totalBytes > 0 {
                     Text(percent)
@@ -497,6 +519,65 @@ private struct StatChip: View {
     }
 }
 
+/// Shown when a scan finishes, until dismissed. Deliberately not a modal: the
+/// scan runs for over an hour, so the user is usually away when it ends, and a
+/// dialog would have to be clicked away before the results underneath — which
+/// already say everything a summary dialog would — could be touched. The
+/// counts double as filter buttons, which is the part a modal couldn't do.
+private struct ScanSummaryBar: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+    let summary: RecoveryViewModel.ScanSummary
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text("Finished in \(RecoveryViewModel.elapsedLabel(summary.duration))")
+                .font(.callout.weight(.medium))
+
+            Divider().frame(height: 14)
+
+            countButton("\(summary.found.formatted()) found", .all)
+            if summary.new > 0 {
+                countButton("\(summary.new.formatted()) new", .unrecovered)
+            }
+            if summary.alreadyRecovered > 0 {
+                countButton("\(summary.alreadyRecovered.formatted()) already recovered", .recovered)
+            }
+            if summary.duplicates > 0 {
+                // Not a button: there's no duplicates-only view to jump to.
+                Text("\(summary.duplicates.formatted()) duplicates")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .help("Same first 4 KB and length as an earlier result. Select All skips these.")
+            }
+
+            Spacer()
+
+            Button {
+                viewModel.dismissScanSummary()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss this summary")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
+    private func countButton(_ label: String, _ visibility: RecoveredVisibility) -> some View {
+        Button(label) { viewModel.recoveredVisibility = visibility }
+            .buttonStyle(.link)
+            .font(.callout)
+            .help("Show only these")
+    }
+}
+
 private struct ResultsView: View {
     @ObservedObject var viewModel: RecoveryViewModel
     @Binding var appearanceRaw: String
@@ -526,6 +607,10 @@ private struct ResultsView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
+            }
+
+            if let summary = viewModel.scanSummary {
+                ScanSummaryBar(viewModel: viewModel, summary: summary)
             }
 
             if let note = viewModel.scanNote {

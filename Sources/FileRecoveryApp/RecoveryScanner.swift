@@ -165,8 +165,16 @@ struct RecoveryScanner: Sendable {
         let regionEnd = region.range.upperBound
         var items: [RecoveredItem] = []
         var cursor = region.range.lowerBound
-        var carry = Data()
+        // Kept as bytes, not Data: the scan buffer used to be built as Data and
+        // then converted to [UInt8] for every chunk, copying 4 MB twice per read.
+        var carry: [UInt8] = []
         var lastReport = Date.distantPast
+        // Candidates arrive in ascending start order — findCandidates only walks
+        // forward, and each chunk's search starts exactly where the last one
+        // stopped. So "does this overlap anything already found?" is answered by
+        // one comparison against the furthest end so far, instead of a scan over
+        // every item found so far. That scan was O(n²) across a whole drive.
+        var furthestItemEnd = region.range.lowerBound
 
         while cursor < regionEnd {
             try await waitIfPaused(pauseGate)
@@ -175,7 +183,7 @@ struct RecoveryScanner: Sendable {
             let isLast = chunk.isEmpty || cursor + UInt64(chunk.count) >= regionEnd
 
             var buffer = carry
-            buffer.append(chunk)
+            buffer.append(contentsOf: chunk)
             let baseOffset = cursor - UInt64(carry.count)
             let searchLimit = isLast ? buffer.count : max(0, buffer.count - overlapSize)
 
@@ -188,18 +196,19 @@ struct RecoveryScanner: Sendable {
                 selectedKinds: selectedKinds,
                 deletedFiles: deletedFiles
             ) {
-                guard !overlapsExisting(candidate, in: items),
+                guard candidate.byteOffset >= furthestItemEnd,
                       !overlapsExisting(candidate, in: claimed) else { continue }
                 var candidate = candidate
                 candidate.fingerprint = fingerprint(for: candidate)
                 candidate.isDuplicate = tracker.markSeen(candidate.fingerprint)
+                furthestItemEnd = max(furthestItemEnd, candidate.byteOffset + candidate.byteLength)
                 items.append(candidate)
                 await itemFound(candidate)
             }
 
             cursor += UInt64(chunk.count)
             if isLast { break }
-            carry = buffer.suffix(min(overlapSize, buffer.count))
+            carry = Array(buffer.suffix(min(overlapSize, buffer.count)))
 
             // Throttle: on fast drives per-chunk reporting floods the UI.
             if Date().timeIntervalSince(lastReport) >= 0.25 {
@@ -261,7 +270,7 @@ struct RecoveryScanner: Sendable {
     }
 
     private func findCandidates(
-        in data: Data,
+        in bytes: [UInt8],
         source: ScanSource,
         regionEnd: UInt64,
         baseOffset: UInt64,
@@ -270,7 +279,6 @@ struct RecoveryScanner: Sendable {
         deletedFiles: [UInt64: DeletedFileEntry]
     ) throws -> [RecoveredItem] {
         var results: [RecoveredItem] = []
-        let bytes = [UInt8](data)
         guard !bytes.isEmpty else { return [] }
 
         // Only a dozen byte values can begin any signature, so skip the rest
@@ -318,6 +326,29 @@ struct RecoveryScanner: Sendable {
         return results
     }
 
+    /// Marker ids that can legally follow SOI, i.e. the byte after FFD8FF.
+    ///
+    /// This is a cost filter, not a correctness one. A false FFD8FF in random
+    /// data sends the carver into the end-marker fallback, which scans forward
+    /// up to jpegSearchCap (256 MB) before giving up — and free space is full
+    /// of long runs holding no FFD9 to stop it early, so each false header can
+    /// cost a quarter gigabyte of reads. A real JPEG always carries a valid
+    /// marker here, so requiring one drops ~86% of random hits before they get
+    /// that far.
+    ///
+    /// Deliberately generous: the whole SOF and APP range is allowed rather
+    /// than just the common APP0/APP1/DQT, so an unusual first segment still
+    /// carves. The only files this can lose are ones corrupted in this exact
+    /// byte, which would carve to a broken image anyway.
+    static let jpegMarkersAfterSOI: [Bool] = {
+        var table = [Bool](repeating: false, count: 256)
+        for id in 0xC0...0xCF { table[id] = true } // SOF0-15, DHT, DAC
+        for id in 0xDA...0xDD { table[id] = true } // SOS, DQT, DNL, DRI
+        for id in 0xE0...0xEF { table[id] = true } // APP0-APP15
+        table[0xFE] = true                         // COM
+        return table
+    }()
+
     /// First bytes that can begin a signature for the selected kinds. Mirrors
     /// the cases in detect(); a byte missing here is never offered to it, so
     /// the two must be kept in step (a test pins that they are).
@@ -354,7 +385,9 @@ struct RecoveryScanner: Sendable {
 
         switch bytes[index] {
         case 0xFF: // JPEG
-            guard kinds.contains(.jpeg), match(bytes, index, [0xFF, 0xD8, 0xFF]) else { return nil }
+            guard kinds.contains(.jpeg), match(bytes, index, [0xFF, 0xD8, 0xFF]),
+                  index + 3 < bytes.count,
+                  Self.jpegMarkersAfterSOI[Int(bytes[index + 3])] else { return nil }
             let limit = min(regionEnd, absolute &+ jpegSearchCap)
             // Prefer the structural length; fall back to a raw FFD9 scan when the
             // segments don't hold, so a damaged JPEG still comes back as before.
@@ -471,6 +504,11 @@ struct RecoveryScanner: Sendable {
 
     /// Signature-only check of a file head, used to validate deleted
     /// directory entries whose length we already know.
+    ///
+    /// Stays permissive where detect() is strict: this runs once per directory
+    /// entry rather than per byte, so it costs nothing to be lenient, and the
+    /// filesystem has already told us a file started here. Requiring a valid
+    /// post-SOI marker would only drop recoveries.
     private func sniffKind(_ b: [UInt8]) -> (MediaKind, String?)? {
         if match(b, 0, [0xFF, 0xD8, 0xFF]) { return (.jpeg, nil) }
         if match(b, 0, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return (.png, nil) }

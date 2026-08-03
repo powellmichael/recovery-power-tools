@@ -12,7 +12,7 @@ final class RecoveryViewModel: ObservableObject {
     /// Empty means "every type" at scan time — see effectiveKinds. Nothing is
     /// checked by default so a scan defaults to finding everything.
     @Published var selectedKinds: Set<MediaKind> = []
-    @Published var items: [RecoveredItem] = []
+    @Published var items: [RecoveredItem] = [] { didSet { filteredCache = nil } }
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
     @Published var selectedItemID: RecoveredItem.ID?
@@ -21,7 +21,12 @@ final class RecoveryViewModel: ObservableObject {
     @Published var tableSelection: Set<RecoveredItem.ID> = []
     /// Where a shift-click range starts. Set by a plain or command click.
     private var selectionAnchorID: RecoveredItem.ID?
-    @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = []
+    /// Only the "Marked" view filters on this, so ticking a checkbox in any
+    /// other view must not throw the filtered list away — that happens once per
+    /// click while bulk-selecting.
+    @Published var selectedRecoveryIDs: Set<RecoveredItem.ID> = [] {
+        didSet { if recoveredVisibility == .marked { filteredCache = nil } }
+    }
     @Published var previewImage: NSImage?
     @Published var previewPlayer: AVPlayer?
     @Published var previewMetadata = ImageMetadata()
@@ -29,13 +34,13 @@ final class RecoveryViewModel: ObservableObject {
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
     @Published var scanNote: String?
-    @Published var filenameFilter = ""
-    @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = []
+    @Published var filenameFilter = "" { didSet { filteredCache = nil } }
+    @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = [] { didSet { filteredCache = nil } }
     @Published var isPreviewPaneVisible = false
     @Published var showFullSizePreview = false
     @Published var saveAsZip = false
     @Published var zipFileName = ""
-    @Published var recoveredVisibility: RecoveredVisibility = .all
+    @Published var recoveredVisibility: RecoveredVisibility = .all { didSet { filteredCache = nil } }
     @Published var showClearFilterPrompt = false
     /// Fast scan: quicker but skips brute-force recovery of damaged files.
     @Published var fastScan = false
@@ -50,7 +55,21 @@ final class RecoveryViewModel: ObservableObject {
     @Published private(set) var thumbnails: [RecoveredItem.ID: NSImage] = [:]
     private var thumbnailsRequested: Set<RecoveredItem.ID> = []
 
+    /// Cleared by the didSet on every input below. Nil means "recompute".
+    private var filteredCache: [RecoveredItem]?
+
+    /// SwiftUI reads this several times per render pass, and so do the arrow
+    /// keys, shift-click and Select All. Recomputing meant re-filtering and
+    /// re-sorting the whole result set each time, so the cached value is what
+    /// keeps a large scan navigable.
     var filteredItems: [RecoveredItem] {
+        if let filteredCache { return filteredCache }
+        let computed = computeFilteredItems()
+        filteredCache = computed
+        return computed
+    }
+
+    private func computeFilteredItems() -> [RecoveredItem] {
         var visible = items
         switch recoveredVisibility {
         case .all:
@@ -77,6 +96,134 @@ final class RecoveryViewModel: ObservableObject {
             visible.sort(using: sortOrder)
         }
         return visible
+    }
+
+    /// What a finished scan found. Deliberately a frozen snapshot rather than
+    /// live counts: it describes the scan that just completed, and recomputing
+    /// four passes over 200k items on every render is exactly the cost the
+    /// filtered-list cache exists to avoid.
+    struct ScanSummary: Equatable, Sendable {
+        var duration: TimeInterval
+        var found: Int
+        var duplicates: Int
+        var alreadyRecovered: Int
+        var new: Int
+    }
+
+    /// Non-nil from the end of a scan until dismissed or the next scan starts.
+    @Published var scanSummary: ScanSummary?
+
+    static func summarize(_ items: [RecoveredItem], duration: TimeInterval) -> ScanSummary {
+        var duplicates = 0, alreadyRecovered = 0, new = 0
+        for item in items {
+            if item.isDuplicate { duplicates += 1 }
+            // Matches the Recovered view: recovered-elsewhere counts, because
+            // from the user's point of view the file is already saved.
+            if item.previouslyRecovered || item.recoveredURL != nil || item.reviewMark == .recoveredElsewhere {
+                alreadyRecovered += 1
+            } else if item.reviewMark == nil {
+                new += 1
+            }
+        }
+        return ScanSummary(
+            duration: duration,
+            found: items.count,
+            duplicates: duplicates,
+            alreadyRecovered: alreadyRecovered,
+            new: new
+        )
+    }
+
+    func dismissScanSummary() {
+        scanSummary = nil
+    }
+
+    /// A scan runs for an hour or more, so the user is rarely watching when it
+    /// ends. requestUserAttention bounces the dock icon until the app is
+    /// focused. A Notification Centre banner would be better, but that needs a
+    /// bundle identifier and this ships as a bare SwiftPM executable.
+    private func announceCompletion() {
+        guard !NSApp.isActive else { return }
+        NSApp.requestUserAttention(.criticalRequest)
+    }
+
+    /// When the running segment of the current scan started, or nil when the
+    /// clock is stopped. Paused time is deliberately excluded — "how long has
+    /// this been running" shouldn't keep climbing while the user has it
+    /// deliberately halted, and a pause can last hours.
+    @Published private(set) var scanStartedAt: Date?
+    /// Time banked from earlier segments of the same scan, before each pause.
+    private var bankedScanTime: TimeInterval = 0
+
+    var elapsedScanTime: TimeInterval {
+        bankedScanTime + (scanStartedAt.map { Date().timeIntervalSince($0) } ?? 0)
+    }
+
+    /// Nil until a scan has run, so the UI shows nothing on a fresh launch.
+    /// Survives completion on purpose: "that took 3h 12m" is worth keeping.
+    var elapsedScanLabel: String? {
+        guard scanStartedAt != nil || bankedScanTime > 0 else { return nil }
+        return Self.elapsedLabel(elapsedScanTime)
+    }
+
+    /// Compact and fixed-width-ish so a ticking clock doesn't jitter the layout.
+    static func elapsedLabel(_ seconds: TimeInterval) -> String {
+        let total = Int(max(0, seconds))
+        let hours = total / 3600, minutes = (total % 3600) / 60, secs = total % 60
+        if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
+        if minutes > 0 { return String(format: "%dm %02ds", minutes, secs) }
+        return "\(secs)s"
+    }
+
+    /// Power-management assertion held while a scan is actually running.
+    ///
+    /// Without it macOS App Nap is free to throttle the process once the app
+    /// stops being frontmost: it lowers CPU priority, coalesces timers and
+    /// demotes disk I/O to a background tier. Locking the screen during a real
+    /// 842 GB scan roughly halved throughput for the locked hour. A scan that
+    /// runs unattended for hours is the exact case App Nap should not touch.
+    ///
+    /// `.userInitiated` already implies `.idleSystemSleepDisabled`, so this
+    /// also stops the system idle-sleeping mid-scan. Display sleep is left
+    /// alone — the screen going dark is fine and saves power.
+    private var scanActivity: NSObjectProtocol?
+    /// Recovery gets its own token: writing 150k files runs for hours too, and
+    /// it can start while no scan is running, so it can't share the scan's.
+    private var recoveryActivity: NSObjectProtocol?
+
+    /// Test seams: whether each assertion is currently held.
+    var isHoldingScanActivity: Bool { scanActivity != nil }
+    var isHoldingRecoveryActivity: Bool { recoveryActivity != nil }
+
+    /// Idempotent on both sides — taking twice must not strand the first token,
+    /// and releasing twice must be harmless, because the callers are spread
+    /// across pause, cancel and three error paths.
+    private func takeActivity(_ token: inout NSObjectProtocol?, reason: String) {
+        guard token == nil else { return }
+        token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: reason)
+    }
+
+    private func releaseActivity(_ token: inout NSObjectProtocol?) {
+        if let token { ProcessInfo.processInfo.endActivity(token) }
+        token = nil
+    }
+
+    /// Internal rather than private so tests can drive the clock without
+    /// running a real scan against a real device.
+    ///
+    /// The power assertion is tied to the clock deliberately: the clock runs
+    /// exactly when the scan does (it stops on pause and at every exit path),
+    /// so binding them here means the two can never drift out of step.
+    func startScanClock(resetTotal: Bool) {
+        if resetTotal { bankedScanTime = 0 }
+        scanStartedAt = Date()
+        takeActivity(&scanActivity, reason: "Scanning a drive for recoverable files")
+    }
+
+    func stopScanClock() {
+        bankedScanTime = elapsedScanTime
+        scanStartedAt = nil
+        releaseActivity(&scanActivity)
     }
 
     private var scanTask: Task<Void, Never>?
@@ -117,6 +264,9 @@ final class RecoveryViewModel: ObservableObject {
         // An unreadable history file is surfaced immediately, not on first save:
         // the user should know tracking is off before they recover anything.
         logWarning = recoveryLog.loadError
+
+        // Sweeps full-size previews left behind if a previous run crashed.
+        Self.purgePreviewCache()
 
         // SwiftUI's Table focus and bare-key shortcuts are both unreliable on
         // macOS; an AppKit event monitor always sees arrow keys.
@@ -218,6 +368,12 @@ final class RecoveryViewModel: ObservableObject {
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
+        // A new drive means the previous scan's duration and counts no
+        // longer apply. Go through stopScanClock so the power assertion is
+        // released rather than leaked if a scan was still running.
+        stopScanClock()
+        bankedScanTime = 0
+        scanSummary = nil
         state = .idle
     }
 
@@ -288,6 +444,7 @@ final class RecoveryViewModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         state = .scanning
+        startScanClock(resetTotal: true)
         manifestStatus = "Verifying against the drive…"
 
         let scanner = scanner
@@ -305,9 +462,13 @@ final class RecoveryViewModel: ObservableObject {
                 try Task.checkCancellation()
                 await MainActor.run { self?.applyImported(verified, manifest: manifest) }
             } catch is CancellationError {
-                await MainActor.run { self?.state = .idle }
+                await MainActor.run {
+                    self?.stopScanClock()
+                    self?.state = .idle
+                }
             } catch {
                 await MainActor.run {
+                    self?.stopScanClock()
                     self?.state = .failed(error.localizedDescription)
                     self?.manifestStatus = nil
                 }
@@ -340,6 +501,7 @@ final class RecoveryViewModel: ObservableObject {
         manifestStatus = stale == 0
             ? "All \(items.count) entries verified against the drive."
             : "\(recoverable) of \(items.count) entries still match the drive; \(stale) changed and can't be recovered."
+        stopScanClock()
         state = .finished
     }
 
@@ -407,7 +569,9 @@ final class RecoveryViewModel: ObservableObject {
         progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
+        scanSummary = nil
         state = .scanning
+        startScanClock(resetTotal: true)
 
         var configured = scanner
         configured.fastScan = fastScan
@@ -446,12 +610,23 @@ final class RecoveryViewModel: ObservableObject {
                     let existingIDs = Set(self.items.map(\.id))
                     let missing = found.filter { !existingIDs.contains($0.id) }.map { self.markedIfPreviouslyRecovered($0) }
                     self.items.append(contentsOf: missing)
+                    self.stopScanClock()
+                    self.scanSummary = Self.summarize(self.items, duration: self.elapsedScanTime)
                     self.state = .finished
+                    self.announceCompletion()
                 }
             } catch is CancellationError {
-                await MainActor.run { self?.state = .idle }
+                // No bounce and no summary: the user cancelled, so they know.
+                await MainActor.run {
+                    self?.stopScanClock()
+                    self?.state = .idle
+                }
             } catch {
-                await MainActor.run { self?.state = .failed(error.localizedDescription) }
+                await MainActor.run {
+                    self?.stopScanClock()
+                    self?.state = .failed(error.localizedDescription)
+                    self?.announceCompletion()
+                }
             }
         }
     }
@@ -461,6 +636,7 @@ final class RecoveryViewModel: ObservableObject {
         scanTask = nil
         pauseGate = nil
         flushPendingItems()
+        stopScanClock()
         state = .idle
     }
 
@@ -468,9 +644,13 @@ final class RecoveryViewModel: ObservableObject {
         switch state {
         case .scanning:
             pauseGate?.setPaused(true)
+            stopScanClock()
             state = .paused
         case .paused:
             pauseGate?.setPaused(false)
+            // Resume without resetting: the banked time from before the pause
+            // carries forward, so the total stays the whole scan's running time.
+            startScanClock(resetTotal: false)
             state = .scanning
         default:
             break
@@ -581,7 +761,7 @@ final class RecoveryViewModel: ObservableObject {
         let scanner = scanner
         let itemID = item.id
         Task.detached(priority: .utility) { [weak self] in
-            let url = Self.previewURL(for: item)
+            let url = Self.thumbnailURL(for: item)
             defer { try? FileManager.default.removeItem(at: url) }
             try? scanner.write(item, to: url)
             // NSImage isn't Sendable, so hand back PNG bytes and build the
@@ -669,10 +849,7 @@ final class RecoveryViewModel: ObservableObject {
             setSelectedForRecovery(item, isSelected: isSelected)
             return
         }
-        for id in tableSelection {
-            guard let match = items.first(where: { $0.id == id }) else { continue }
-            setSelectedForRecovery(match, isSelected: isSelected)
-        }
+        setSelectedForRecovery(ids: tableSelection, isSelected: isSelected)
     }
 
     /// Command-click: add or remove one item without disturbing the rest.
@@ -704,9 +881,11 @@ final class RecoveryViewModel: ObservableObject {
 
     /// Context-menu action over whatever rows are highlighted.
     func setSelectedForRecovery(ids: Set<RecoveredItem.ID>, isSelected: Bool) {
-        for id in ids {
-            guard let match = items.first(where: { $0.id == id }) else { continue }
-            setSelectedForRecovery(match, isSelected: isSelected)
+        // One pass over items to drop ids that aren't in the current results,
+        // rather than a linear scan per id — that was O(items x selection), so
+        // ticking a 10k-row range stalled the main actor.
+        for id in Set(items.lazy.map(\.id)).intersection(ids) {
+            setSelectedForRecovery(id: id, isSelected: isSelected)
         }
     }
 
@@ -745,13 +924,17 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func setSelectedForRecovery(_ item: RecoveredItem, isSelected: Bool) {
+        setSelectedForRecovery(id: item.id, isSelected: isSelected)
+    }
+
+    private func setSelectedForRecovery(id: RecoveredItem.ID, isSelected: Bool) {
         // A stale manifest entry's bytes are gone; recovering it would write
         // whatever now occupies that offset.
-        guard staleReasons[item.id] == nil else { return }
+        guard staleReasons[id] == nil else { return }
         if isSelected {
-            selectedRecoveryIDs.insert(item.id)
+            selectedRecoveryIDs.insert(id)
         } else {
-            selectedRecoveryIDs.remove(item.id)
+            selectedRecoveryIDs.remove(id)
         }
     }
 
@@ -784,6 +967,9 @@ final class RecoveryViewModel: ObservableObject {
             return
         }
         state = .recovering
+        // Taken after the guard above, so a refused recovery doesn't hold it.
+        // Released in applyRecoveryOutcomes, which every path reaches.
+        takeActivity(&recoveryActivity, reason: "Writing recovered files to disk")
 
         let scanner = scanner
         let selected = items.filter { selectedRecoveryIDs.contains($0.id) }
@@ -857,10 +1043,18 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     private func applyRecoveryOutcomes(_ outcomes: [(id: RecoveredItem.ID, url: URL?, error: String?)], clearZipNameOnSuccess: Bool = false) {
+        releaseActivity(&recoveryActivity)
         var recovered: [RecoveredItem.ID] = []
         var failed = 0
+        // Built once: a firstIndex scan per outcome is O(items x recovered), so
+        // recovering thousands of files out of a large scan froze the UI at the
+        // worst moment. uniquingKeysWith keeps firstIndex's "earliest wins".
+        let indexByID = Dictionary(
+            items.enumerated().map { ($1.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         for outcome in outcomes {
-            guard let index = items.firstIndex(where: { $0.id == outcome.id }) else { continue }
+            guard let index = indexByID[outcome.id] else { continue }
             if let url = outcome.url {
                 items[index].recoveredURL = url
                 items[index].recoveryError = nil
@@ -949,6 +1143,9 @@ final class RecoveryViewModel: ObservableObject {
     private func preparePreview(for item: RecoveredItem) {
         previewTask?.cancel()
         clearPreview()
+        // clearPreview released the player and image, so the previous carve on
+        // disk has no reader left. Drop it before writing the next one.
+        Self.purgePreviewCache()
 
         let isVideo = item.kind.isVideoPreviewable
         guard item.kind.isPreviewable || isVideo else { return }
@@ -992,9 +1189,28 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    private nonisolated static let previewDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FileRecoveryPreviews", isDirectory: true)
+
+    /// Thumbnails get their own directory: they're written and deleted by
+    /// detached tasks, so purging the preview cache must not race them.
+    private nonisolated static let thumbnailDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FileRecoveryThumbnails", isDirectory: true)
+
     private nonisolated static func previewURL(for item: RecoveredItem) -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("FileRecoveryPreviews", isDirectory: true)
-            .appendingPathComponent("\(item.id.uuidString).\(item.fileExtension)")
+        previewDirectory.appendingPathComponent("\(item.id.uuidString).\(item.fileExtension)")
+    }
+
+    private nonisolated static func thumbnailURL(for item: RecoveredItem) -> URL {
+        thumbnailDirectory.appendingPathComponent("\(item.id.uuidString).\(item.fileExtension)")
+    }
+
+    /// Previews are full-size carves — a 2 GB video preview is a 2 GB temp file.
+    /// Nothing deleted them, so browsing a long list filled the temp directory
+    /// with a copy of every file the user clicked. Cleared whenever a new
+    /// preview starts (the old one has already been torn down by clearPreview)
+    /// and at launch, which also sweeps leftovers from a previous session.
+    private nonisolated static func purgePreviewCache() {
+        try? FileManager.default.removeItem(at: previewDirectory)
     }
 }
