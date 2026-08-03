@@ -105,14 +105,13 @@ than per byte, and there the filesystem has already said a file started there.
 - Four-way visibility: All / New / Marked / Recovered. "Marked" shows only
   checkbox-selected rows; "Recovered" includes recovered-elsewhere, because
   from the user's point of view those files are recovered too.
-- Media types grouped into collapsible Images / Video / Archives categories.
-  **Nothing is checked by default, and an empty selection means every type**
-  (`effectiveKinds`) — but see "Measured Performance": empty is also the
-  slowest possible setting, because it enables MPEG. The sidebar controls
-  scroll, so expanding a category
-  grows downward instead of pushing the top of the sidebar out of view; the
-  status block stays pinned to the bottom so scan progress is visible while
-  scrolled.
+- Media presets replace the format tree for normal use: Photos, Videos,
+  Photos & Videos, and Everything. Everything remains the completeness-first
+  default and is explicitly labelled as slower because it enables MPEG.
+  Custom expands the individual Images / Video / Archives toggles, starting
+  with every format truthfully checked; Scan is disabled if a custom selection
+  contains no formats. The sidebar controls scroll, so expanded custom options
+  grow downward while the status block stays pinned to the bottom.
 - Multi-selection in both views: shift-click for a range, command-click for
   discontiguous picks. Ticking one checkbox inside a multi-row selection
   applies to the whole selection; a checkbox outside it affects only its own
@@ -362,31 +361,27 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
 
 ## Recommended Next Steps
 
-1. **Decide the default media selection.** Empty-means-all is currently the
-   slowest possible setting because it enables MPEG (see Measured
-   Performance). Either optimise the `0x00` path, drop MPEG from the implicit
-   "all", or flag it in the UI as the expensive one. Right now the
-   least-informed choice is the slowest, which is backwards.
-2. **Verify the App Nap fix** on the next long scan by noting the percentage
+1. **Verify the App Nap fix** on the next long scan by noting the percentage
    at lock and at unlock. A single end-of-scan average cannot separate the
    locked stretch, so the current evidence is consistent with the fix working
    but does not prove it.
-3. **Sample-check result quality.** Selecting video alongside JPEG cut results
+2. **Sample-check result quality.** Selecting video alongside JPEG cut results
    from 150,149 to 65,965 on the same drive. The theory is that videos now
    claim their own byte ranges and suppress JPEGs carved out of their
    interiors, plus the marker gate rejecting false headers — i.e. the removed
    items were junk. Unverified: it needs eyes on recovered files.
-4. **Exercise Select All and a bulk recovery** at ~200k results. Those paths
+3. **Exercise Select All and a bulk recovery** at ~200k results. Those paths
    are O(items + selection) now, but that has never been run at this scale.
-5. **Landing page** once the design settles (see Future Enhancements).
-6. **FAT32 deleted directory entries** for original filenames — the last
+4. **Continue the landing-page workflow redesign** with the dedicated scan
+   progress state and results-toolbar cleanup.
+5. **FAT32 deleted directory entries** for original filenames — the last
    filesystem still showing "Not Available". Worth it only if FAT32 volumes
    (SD cards, older USB sticks) are actually in scope. Note this pairs with the
    landing page's SD Card Recovery category: SD cards are typically FAT32, so
    that category is thin without this parser.
-7. **Scan resume** via a cursor in the manifest, if field testing shows
+6. **Scan resume** via a cursor in the manifest, if field testing shows
    manifests survive real-world use.
-8. App icon, signing, Xcode project — only when distribution matters.
+7. App icon, signing, Xcode project — only when distribution matters.
 
 ## Measured Performance
 

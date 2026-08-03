@@ -424,6 +424,7 @@ private func tempLogURL() -> URL {
     @Test func emptySelectionMeansEveryKind() {
         let vm = RecoveryViewModel()
         #expect(vm.selectedKinds.isEmpty)
+        #expect(vm.selectedMediaPreset == .everything)
         #expect(vm.effectiveKinds == Set(MediaKind.allCases))
     }
 
@@ -431,6 +432,47 @@ private func tempLogURL() -> URL {
         let vm = RecoveryViewModel()
         vm.selectedKinds = [.jpeg, .png]
         #expect(vm.effectiveKinds == [.jpeg, .png])
+    }
+
+    @Test func photoPresetSelectsEveryImageKind() {
+        let vm = RecoveryViewModel()
+        vm.selectMediaPreset(.photos)
+
+        #expect(vm.selectedMediaPreset == .photos)
+        #expect(vm.effectiveKinds == Set(MediaCategory.images.kinds))
+        #expect(vm.effectiveKinds.isDisjoint(with: Set(MediaCategory.video.kinds)))
+    }
+
+    @Test func photosAndVideosLeavesOutArchives() {
+        let vm = RecoveryViewModel()
+        vm.selectMediaPreset(.photosAndVideos)
+
+        #expect(vm.effectiveKinds == Set(MediaCategory.images.kinds + MediaCategory.video.kinds))
+        #expect(!vm.effectiveKinds.contains(.zip))
+    }
+
+    @Test func customStartsTruthfullyWithEveryFormatChecked() {
+        let vm = RecoveryViewModel()
+        vm.selectMediaPreset(.custom)
+
+        #expect(vm.selectedMediaPreset == .custom)
+        #expect(vm.selectedKinds == Set(MediaKind.allCases))
+        vm.toggleKind(.mpeg)
+        #expect(!vm.effectiveKinds.contains(.mpeg))
+        #expect(vm.effectiveKinds.count == MediaKind.allCases.count - 1)
+    }
+
+    @Test func emptyCustomSelectionCannotStartAScan() {
+        let vm = RecoveryViewModel()
+        vm.target = .path(URL(fileURLWithPath: "/tmp/test-source"))
+        vm.selectMediaPreset(.custom)
+        for category in MediaCategory.allCases {
+            vm.setKinds(in: category, on: false)
+        }
+
+        #expect(vm.selectedKinds.isEmpty)
+        #expect(vm.effectiveKinds.isEmpty)
+        #expect(!vm.canScan)
     }
 }
 

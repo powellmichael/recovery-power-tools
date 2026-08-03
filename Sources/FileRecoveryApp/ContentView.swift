@@ -227,12 +227,7 @@ private struct Sidebar: View {
                     }
 
                     SidebarCard(title: "Media") {
-                        MediaFilterList(viewModel: viewModel)
-                        if viewModel.selectedKinds.isEmpty {
-                            Text("Nothing selected — the scan will look for every type.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        MediaPresetSelector(viewModel: viewModel)
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
@@ -882,6 +877,104 @@ private struct ResultsView: View {
             .filter { viewModel.selectedRecoveryIDs.contains($0.id) }
             .reduce(UInt64(0)) { $0 + $1.byteLength }
         return ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+    }
+}
+
+/// Friendly presets cover normal scans; individual format toggles stay behind
+/// Custom so new users do not have to understand twelve container formats.
+private struct MediaPresetSelector: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+    @State private var showsCustomFormats = false
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(MediaPreset.primaryCases) { preset in
+                    presetButton(preset)
+                }
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if viewModel.selectedMediaPreset == .custom {
+                        showsCustomFormats.toggle()
+                    } else {
+                        viewModel.selectMediaPreset(.custom)
+                        showsCustomFormats = true
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: MediaPreset.custom.systemImage)
+                    Text("Choose individual formats")
+                    Spacer()
+                    Image(systemName: showsCustomFormats && viewModel.selectedMediaPreset == .custom ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(viewModel.selectedMediaPreset == .custom ? .accentColor : nil)
+
+            if viewModel.selectedMediaPreset == .custom, showsCustomFormats {
+                Divider()
+                MediaFilterList(viewModel: viewModel)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+
+                if viewModel.selectedKinds.isEmpty {
+                    Label("Choose at least one format to scan.", systemImage: "exclamationmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } else {
+                Label {
+                    Text(viewModel.selectedMediaPreset.detail)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: viewModel.selectedMediaPreset == .everything ? "clock" : "checkmark.circle.fill")
+                        .foregroundStyle(viewModel.selectedMediaPreset == .everything ? .orange : .green)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func presetButton(_ preset: MediaPreset) -> some View {
+        let selected = viewModel.selectedMediaPreset == preset
+        return Button {
+            viewModel.selectMediaPreset(preset)
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: preset.systemImage)
+                    .font(.title3)
+                Text(preset.label)
+                    .font(.caption.weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+            .frame(maxWidth: .infinity, minHeight: 58)
+            .padding(.horizontal, 5)
+            .background(
+                selected ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.045),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(selected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.07))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(preset.label) media preset")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(preset.detail)
     }
 }
 

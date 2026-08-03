@@ -9,9 +9,10 @@ import UniformTypeIdentifiers
 final class RecoveryViewModel: ObservableObject {
     @Published var target: ScanTarget?
     @Published var destinationURL: URL?
-    /// Empty means "every type" at scan time — see effectiveKinds. Nothing is
-    /// checked by default so a scan defaults to finding everything.
+    /// Empty is the established "every type" sentinel for the Everything
+    /// preset. In Custom mode an empty selection really means no formats.
     @Published var selectedKinds: Set<MediaKind> = []
+    @Published private(set) var selectedMediaPreset: MediaPreset = .everything
     @Published var items: [RecoveredItem] = [] { didSet { filteredCache = nil } }
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
@@ -298,12 +299,14 @@ final class RecoveryViewModel: ObservableObject {
 
     var canScan: Bool {
         target != nil && !isScanActive && state != .recovering
+            && (selectedMediaPreset != .custom || !selectedKinds.isEmpty)
     }
 
     /// Kinds the scan actually looks for: the selection, or every kind when
     /// nothing is checked.
     var effectiveKinds: Set<MediaKind> {
-        selectedKinds.isEmpty ? Set(MediaKind.allCases) : selectedKinds
+        if selectedMediaPreset == .custom { return selectedKinds }
+        return selectedKinds.isEmpty ? Set(MediaKind.allCases) : selectedKinds
     }
 
     var canRecover: Bool {
@@ -522,6 +525,7 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func toggleKind(_ kind: MediaKind) {
+        selectedMediaPreset = .custom
         if selectedKinds.contains(kind) {
             selectedKinds.remove(kind)
         } else {
@@ -538,11 +542,26 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func setKinds(in category: MediaCategory, on: Bool) {
+        selectedMediaPreset = .custom
         if on {
             selectedKinds.formUnion(category.kinds)
         } else {
             selectedKinds.subtract(category.kinds)
         }
+    }
+
+    func selectMediaPreset(_ preset: MediaPreset) {
+        if preset == .custom {
+            // Entering Custom from Everything should show truthful checked
+            // boxes, not the legacy empty-set sentinel that also means all.
+            if selectedKinds.isEmpty {
+                selectedKinds = Set(MediaKind.allCases)
+            }
+            selectedMediaPreset = .custom
+            return
+        }
+        selectedKinds = preset.kinds ?? []
+        selectedMediaPreset = preset
     }
 
     /// Scan button entry point: if a filename filter is active it would hide

@@ -85,6 +85,65 @@ enum MediaCategory: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum MediaPreset: String, CaseIterable, Identifiable, Sendable {
+    case photos
+    case videos
+    case photosAndVideos
+    case everything
+    case custom
+
+    var id: String { rawValue }
+
+    static let primaryCases: [MediaPreset] = [.photos, .videos, .photosAndVideos, .everything]
+
+    var label: String {
+        switch self {
+        case .photos: "Photos"
+        case .videos: "Videos"
+        case .photosAndVideos: "Photos & Videos"
+        case .everything: "Everything"
+        case .custom: "Custom"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .photos: "photo.on.rectangle"
+        case .videos: "film"
+        case .photosAndVideos: "photo.stack"
+        case .everything: "square.grid.2x2"
+        case .custom: "slider.horizontal.3"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .photos: "JPEG, PNG, HEIC, RAW, and BMP"
+        case .videos: "All supported movie formats"
+        case .photosAndVideos: "All supported photos and videos"
+        case .everything: "Photos, videos, and ZIP archives. Includes slower MPEG scanning."
+        case .custom: "Choose individual formats below."
+        }
+    }
+
+    /// Nil means the user will choose individual formats. An empty set is the
+    /// established scanner sentinel for every supported kind.
+    var kinds: Set<MediaKind>? {
+        switch self {
+        case .photos:
+            Set(MediaCategory.images.kinds)
+        case .videos:
+            Set(MediaCategory.video.kinds)
+        case .photosAndVideos:
+            Set(MediaCategory.images.kinds + MediaCategory.video.kinds)
+        case .everything:
+            []
+        case .custom:
+            nil
+        }
+    }
+}
+
 enum ScanTarget: Equatable, Sendable {
     case path(URL)
     case device(ExternalDevice)
