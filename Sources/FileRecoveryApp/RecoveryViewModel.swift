@@ -33,6 +33,7 @@ final class RecoveryViewModel: ObservableObject {
     @Published var previewFileURL: URL?
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
+    @Published private(set) var isRefreshingDevices = false
     @Published var scanNote: String?
     @Published var filenameFilter = "" { didSet { filteredCache = nil } }
     @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = [] { didSet { filteredCache = nil } }
@@ -348,9 +349,13 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func refreshDevices() {
+        guard !isRefreshingDevices else { return }
+        isRefreshingDevices = true
         Task { [weak self] in
             let devices = await Self.listDevices()
-            self?.externalDevices = devices
+            guard let self else { return }
+            externalDevices = devices
+            isRefreshingDevices = false
         }
     }
 

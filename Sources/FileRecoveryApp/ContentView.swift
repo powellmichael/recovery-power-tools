@@ -42,12 +42,21 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            Sidebar(viewModel: viewModel)
-                .navigationSplitViewColumnWidth(min: 270, ideal: 310)
-        } detail: {
-            ResultsView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
+        Group {
+            if viewModel.target == nil {
+                SourceSelectionView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
+                    .transition(.opacity)
+            } else {
+                NavigationSplitView {
+                    Sidebar(viewModel: viewModel)
+                        .navigationSplitViewColumnWidth(min: 270, ideal: 310)
+                } detail: {
+                    ResultsView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
+                }
+                .transition(.opacity)
+            }
         }
+        .animation(.easeInOut(duration: 0.2), value: viewModel.target == nil)
         .sheet(isPresented: Binding(
             get: { viewModel.showFullSizePreview && viewModel.previewImage != nil },
             set: { viewModel.showFullSizePreview = $0 }
