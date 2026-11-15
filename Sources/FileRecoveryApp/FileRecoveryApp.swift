@@ -13,7 +13,7 @@ struct FileRecoveryApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Recovery Power Tools") {
             ContentView()
                 .frame(minWidth: 980, minHeight: 660)
         }

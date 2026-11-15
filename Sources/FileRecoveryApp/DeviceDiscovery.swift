@@ -1,12 +1,23 @@
 import Darwin
 import Foundation
 
+enum RecoveryCompatibility: Equatable, Sendable {
+    case fullySupported
+    case limited
+    case unknown
+}
+
 struct ExternalDevice: Identifiable, Hashable, Sendable {
     /// BSD identifier, e.g. "disk4" or "disk4s1".
     let identifier: String
     let volumeName: String?
     let size: UInt64
     let isWholeDisk: Bool
+    var contentType: String? = nil
+    var filesystemName: String? = nil
+    var mountPoint: String? = nil
+    var busProtocol: String? = nil
+    var physicalName: String? = nil
 
     var id: String { identifier }
     var rawDevicePath: String { "/dev/r\(identifier)" }
@@ -18,32 +29,60 @@ struct ExternalDevice: Identifiable, Hashable, Sendable {
         return "disk\(digits)"
     }
 
+    var userFacingName: String {
+        if let volumeName, !volumeName.isEmpty { return volumeName }
+        if isWholeDisk { return physicalName ?? "Physical Disk" }
+        switch contentType?.lowercased() {
+        case "apple_apfs": return "APFS Container"
+        case "microsoft basic data": return "Untitled Windows Volume"
+        default: return "Untitled Volume"
+        }
+    }
+
+    var filesystemLabel: String {
+        if let filesystemName, !filesystemName.isEmpty { return filesystemName }
+        switch contentType?.lowercased() {
+        case "apple_apfs": return "APFS"
+        case "microsoft basic data": return "Windows volume"
+        case "efi": return "EFI"
+        default: return "Unknown filesystem"
+        }
+    }
+
+    var recoveryCompatibility: RecoveryCompatibility {
+        let value = (filesystemName ?? contentType ?? "").lowercased()
+        if value.contains("exfat") || value.contains("ntfs") || value.contains("fat32")
+            || value.contains("ms-dos fat32") {
+            return .fullySupported
+        }
+        if value.contains("apfs") { return .limited }
+        return .unknown
+    }
+
+    var isSystemPartition: Bool {
+        guard !isWholeDisk else { return false }
+        let value = (contentType ?? volumeName ?? "").lowercased()
+        return value == "efi" || value.contains("apple_boot") || value.contains("recovery")
+    }
+
     var displayName: String {
         let sizeLabel = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
-        let name = volumeName ?? (isWholeDisk ? "Entire Disk" : "Untitled")
-        return "\(name) (\(identifier), \(sizeLabel))"
+        return "\(userFacingName) (\(identifier), \(sizeLabel))"
     }
 }
 
 enum DeviceDiscovery {
+    private struct DeviceDetails {
+        var volumeName: String?
+        var filesystemName: String?
+        var mountPoint: String?
+        var busProtocol: String?
+        var physicalName: String?
+    }
+
     /// Lists external physical disks and their partitions via diskutil.
     static func externalDevices() -> [ExternalDevice] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        process.arguments = ["list", "-plist", "external", "physical"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+        guard let plist = diskutilPlist(["list", "-plist", "external", "physical"]),
               let disks = plist["AllDisksAndPartitions"] as? [[String: Any]] else {
             return []
         }
@@ -52,16 +91,89 @@ enum DeviceDiscovery {
         for disk in disks {
             guard let diskID = disk["DeviceIdentifier"] as? String else { continue }
             let diskSize = (disk["Size"] as? NSNumber)?.uint64Value ?? 0
+            let wholeDetails = details(for: diskID)
+            let physicalName = wholeDetails.physicalName
             let partitions = disk["Partitions"] as? [[String: Any]] ?? []
             for partition in partitions {
                 guard let partID = partition["DeviceIdentifier"] as? String else { continue }
                 let partSize = (partition["Size"] as? NSNumber)?.uint64Value ?? 0
-                let name = partition["VolumeName"] as? String ?? partition["Content"] as? String
-                devices.append(ExternalDevice(identifier: partID, volumeName: name, size: partSize, isWholeDisk: false))
+                let content = partition["Content"] as? String
+                let listedName = partition["VolumeName"] as? String
+                // EFI and recovery partitions are implementation details, not
+                // useful recovery targets. Never put them in the user chooser.
+                let probe = ExternalDevice(
+                    identifier: partID,
+                    volumeName: listedName,
+                    size: partSize,
+                    isWholeDisk: false,
+                    contentType: content
+                )
+                guard !probe.isSystemPartition else { continue }
+
+                let partDetails = details(for: partID)
+                devices.append(ExternalDevice(
+                    identifier: partID,
+                    volumeName: partDetails.volumeName ?? listedName,
+                    size: partSize,
+                    isWholeDisk: false,
+                    contentType: content,
+                    filesystemName: partDetails.filesystemName,
+                    mountPoint: partDetails.mountPoint,
+                    busProtocol: partDetails.busProtocol ?? wholeDetails.busProtocol,
+                    physicalName: physicalName
+                ))
             }
-            devices.append(ExternalDevice(identifier: diskID, volumeName: nil, size: diskSize, isWholeDisk: true))
+            devices.append(ExternalDevice(
+                identifier: diskID,
+                volumeName: nil,
+                size: diskSize,
+                isWholeDisk: true,
+                contentType: disk["Content"] as? String,
+                busProtocol: wholeDetails.busProtocol,
+                physicalName: physicalName
+            ))
         }
         return devices
+    }
+
+    private static func details(for identifier: String) -> DeviceDetails {
+        guard let plist = diskutilPlist(["info", "-plist", "/dev/\(identifier)"]) else {
+            return DeviceDetails()
+        }
+        func nonempty(_ key: String) -> String? {
+            guard let value = plist[key] as? String, !value.isEmpty else { return nil }
+            return value
+        }
+        let registryName = nonempty("IORegistryEntryName")?.replacingOccurrences(
+            of: #"\s+Media$"#,
+            with: "",
+            options: .regularExpression
+        )
+        return DeviceDetails(
+            volumeName: nonempty("VolumeName"),
+            filesystemName: nonempty("FilesystemUserVisibleName") ?? nonempty("FilesystemName"),
+            mountPoint: nonempty("MountPoint"),
+            busProtocol: nonempty("BusProtocol"),
+            physicalName: registryName ?? nonempty("MediaName")
+        )
+    }
+
+    private static func diskutilPlist(_ arguments: [String]) -> [String: Any]? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
     }
 
     /// BSD partition name backing the volume that contains `path`, e.g. "disk4s1".

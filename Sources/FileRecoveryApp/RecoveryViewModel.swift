@@ -9,9 +9,10 @@ import UniformTypeIdentifiers
 final class RecoveryViewModel: ObservableObject {
     @Published var target: ScanTarget?
     @Published var destinationURL: URL?
-    /// Empty means "every type" at scan time — see effectiveKinds. Nothing is
-    /// checked by default so a scan defaults to finding everything.
+    /// Empty is the established "every type" sentinel for the Everything
+    /// preset. In Custom mode an empty selection really means no formats.
     @Published var selectedKinds: Set<MediaKind> = []
+    @Published private(set) var selectedMediaPreset: MediaPreset = .everything
     @Published var items: [RecoveredItem] = [] { didSet { filteredCache = nil } }
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
@@ -33,6 +34,7 @@ final class RecoveryViewModel: ObservableObject {
     @Published var previewFileURL: URL?
     @Published var previewError: String?
     @Published var externalDevices: [ExternalDevice] = []
+    @Published private(set) var isRefreshingDevices = false
     @Published var scanNote: String?
     @Published var filenameFilter = "" { didSet { filteredCache = nil } }
     @Published var sortOrder: [KeyPathComparator<RecoveredItem>] = [] { didSet { filteredCache = nil } }
@@ -297,22 +299,37 @@ final class RecoveryViewModel: ObservableObject {
 
     var canScan: Bool {
         target != nil && !isScanActive && state != .recovering
+            && (selectedMediaPreset != .custom || !selectedKinds.isEmpty)
     }
 
     /// Kinds the scan actually looks for: the selection, or every kind when
     /// nothing is checked.
     var effectiveKinds: Set<MediaKind> {
-        selectedKinds.isEmpty ? Set(MediaKind.allCases) : selectedKinds
+        if selectedMediaPreset == .custom { return selectedKinds }
+        return selectedKinds.isEmpty ? Set(MediaKind.allCases) : selectedKinds
     }
 
     var canRecover: Bool {
-        destinationURL != nil && !selectedRecoveryIDs.isEmpty && !isScanActive && state != .recovering
+        !selectedRecoveryIDs.isEmpty && !isScanActive && state != .recovering
+    }
+
+    var canReturnToSourceSelection: Bool {
+        !isScanActive && state != .recovering
+    }
+
+    var canPauseScan: Bool {
+        pauseGate != nil && isScanActive
     }
 
     /// Warns when the user picked a folder on an external drive: folder scans
     /// inspect live files only, so deleted files will never appear.
     var sourceWarning: String? {
-        guard case .path(let url) = target,
+        guard case .path(let url) = target else { return nil }
+        // An image stored on an external drive contains the source disk's
+        // bytes, including unallocated space. Only folders need this warning.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
               let device = DeviceDiscovery.externalDevice(containing: url, in: externalDevices) else { return nil }
         return "This folder is on \(device.displayName). Folder scans only look inside existing files — deleted files will NOT be found. Use Choose Drive and pick that device to scan its free space for deleted files."
     }
@@ -320,7 +337,7 @@ final class RecoveryViewModel: ObservableObject {
     var sourceLabel: String? {
         switch target {
         case .path(let url): url.lastPathComponent
-        case .device(let device): device.displayName
+        case .device(let device): device.userFacingName
         case nil: nil
         }
     }
@@ -347,10 +364,23 @@ final class RecoveryViewModel: ObservableObject {
         setTarget(.device(device))
     }
 
+    /// Returns to the landing page without discarding the current results.
+    /// They are cleared only after the user commits to a different source,
+    /// which avoids turning a navigation action into accidental data loss.
+    func returnToSourceSelection() {
+        guard canReturnToSourceSelection else { return }
+        target = nil
+        clearPreview()
+    }
+
     func refreshDevices() {
+        guard !isRefreshingDevices else { return }
+        isRefreshingDevices = true
         Task { [weak self] in
             let devices = await Self.listDevices()
-            self?.externalDevices = devices
+            guard let self else { return }
+            externalDevices = devices
+            isRefreshingDevices = false
         }
     }
 
@@ -382,7 +412,7 @@ final class RecoveryViewModel: ObservableObject {
         thumbnailsRequested = []
     }
 
-    func chooseDestination() {
+    private func chooseDestination() -> URL? {
         let panel = NSOpenPanel()
         panel.title = "Choose Recovery Destination"
         panel.canChooseDirectories = true
@@ -391,9 +421,8 @@ final class RecoveryViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
 
-        if panel.runModal() == .OK {
-            destinationURL = panel.url
-        }
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     // MARK: - Manifests
@@ -517,6 +546,7 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func toggleKind(_ kind: MediaKind) {
+        selectedMediaPreset = .custom
         if selectedKinds.contains(kind) {
             selectedKinds.remove(kind)
         } else {
@@ -533,11 +563,26 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func setKinds(in category: MediaCategory, on: Bool) {
+        selectedMediaPreset = .custom
         if on {
             selectedKinds.formUnion(category.kinds)
         } else {
             selectedKinds.subtract(category.kinds)
         }
+    }
+
+    func selectMediaPreset(_ preset: MediaPreset) {
+        if preset == .custom {
+            // Entering Custom from Everything should show truthful checked
+            // boxes, not the legacy empty-set sentinel that also means all.
+            if selectedKinds.isEmpty {
+                selectedKinds = Set(MediaKind.allCases)
+            }
+            selectedMediaPreset = .custom
+            return
+        }
+        selectedKinds = preset.kinds ?? []
+        selectedMediaPreset = preset
     }
 
     /// Scan button entry point: if a filename filter is active it would hide
@@ -610,6 +655,7 @@ final class RecoveryViewModel: ObservableObject {
                     let existingIDs = Set(self.items.map(\.id))
                     let missing = found.filter { !existingIDs.contains($0.id) }.map { self.markedIfPreviouslyRecovered($0) }
                     self.items.append(contentsOf: missing)
+                    self.pauseGate = nil
                     self.stopScanClock()
                     self.scanSummary = Self.summarize(self.items, duration: self.elapsedScanTime)
                     self.state = .finished
@@ -618,11 +664,13 @@ final class RecoveryViewModel: ObservableObject {
             } catch is CancellationError {
                 // No bounce and no summary: the user cancelled, so they know.
                 await MainActor.run {
+                    self?.pauseGate = nil
                     self?.stopScanClock()
                     self?.state = .idle
                 }
             } catch {
                 await MainActor.run {
+                    self?.pauseGate = nil
                     self?.stopScanClock()
                     self?.state = .failed(error.localizedDescription)
                     self?.announceCompletion()
@@ -960,7 +1008,15 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func recoverSelected() {
-        guard let destinationURL else { return }
+        guard canRecover else { return }
+        recoverSelected(to: chooseDestination())
+    }
+
+    /// Explicit destination path keeps the write pipeline independently
+    /// testable while the user-facing action always asks where to save.
+    func recoverSelected(to chosenDestination: URL?) {
+        guard canRecover, let destinationURL = chosenDestination else { return }
+        self.destinationURL = destinationURL
         if case .device(let device) = target,
            DeviceDiscovery.destination(destinationURL, isOnSameDiskAs: device) {
             state = .failed(RecoveryError.destinationOnSourceDisk.localizedDescription)

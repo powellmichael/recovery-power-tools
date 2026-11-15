@@ -35,6 +35,7 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @StateObject private var viewModel = RecoveryViewModel()
+    @State private var showsLiveResults = false
     @AppStorage("appearance") private var appearanceRaw = AppearancePreference.system.rawValue
 
     private var appearance: AppearancePreference {
@@ -42,11 +43,40 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            Sidebar(viewModel: viewModel)
-                .navigationSplitViewColumnWidth(min: 270, ideal: 310)
-        } detail: {
-            ResultsView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
+        Group {
+            if viewModel.target == nil {
+                SourceSelectionView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
+            } else if viewModel.isScanActive {
+                if showsLiveResults {
+                    VStack(spacing: 0) {
+                        ScanningView(viewModel: viewModel, compact: true) {
+                            showsLiveResults = false
+                        }
+                        Divider()
+                        ResultsView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
+                    }
+                } else {
+                    ScanningView(viewModel: viewModel) {
+                        showsLiveResults = true
+                    }
+                }
+            } else {
+                // This pane contains configuration controls, not navigation
+                // links. Keep it out of NavigationSplitView's sidebar hosting
+                // so native buttons retain normal event handling as presets
+                // update the configuration view.
+                HSplitView {
+                    Sidebar(viewModel: viewModel)
+                        .frame(minWidth: 270, idealWidth: 310, maxWidth: 380)
+                        .clipped()
+                    ResultsView(viewModel: viewModel, appearanceRaw: $appearanceRaw)
+                        .frame(minWidth: 600, maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                }
+            }
+        }
+        .onChange(of: viewModel.isScanActive) { _, active in
+            if !active { showsLiveResults = false }
         }
         .sheet(isPresented: Binding(
             get: { viewModel.showFullSizePreview && viewModel.previewImage != nil },
@@ -159,34 +189,15 @@ private struct Sidebar: View {
                             placeholder: "No source selected",
                             systemImage: "externaldrive"
                         )
-                        HStack(spacing: 6) {
-                            Menu {
-                                if viewModel.externalDevices.isEmpty {
-                                    Text("No external drives found")
-                                }
-                                ForEach(viewModel.externalDevices) { device in
-                                    Button(device.displayName) {
-                                        viewModel.chooseDevice(device)
-                                    }
-                                }
-                                Divider()
-                                Button("Refresh") {
-                                    viewModel.refreshDevices()
-                                }
-                            } label: {
-                                Label("Drive", systemImage: "externaldrive")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .help("Choose an external drive to scan")
-
-                            Button {
-                                viewModel.chooseSource()
-                            } label: {
-                                Label("File / Folder", systemImage: "folder.badge.gearshape")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .help("Choose a file or folder to scan")
+                        Button {
+                            viewModel.returnToSourceSelection()
+                        } label: {
+                            Label("Choose Another Source", systemImage: "chevron.backward")
+                                .frame(maxWidth: .infinity)
                         }
+                        .help("Return to the source selection page")
+                        .buttonStyle(.bordered)
+                        .disabled(!viewModel.canReturnToSourceSelection)
 
                         if let warning = viewModel.sourceWarning {
                             Label(warning, systemImage: "exclamationmark.triangle.fill")
@@ -203,27 +214,8 @@ private struct Sidebar: View {
                         }
                     }
 
-                    SidebarCard(title: "Destination") {
-                        PathRow(
-                            label: viewModel.destinationURL?.lastPathComponent,
-                            placeholder: "No destination selected",
-                            systemImage: "folder"
-                        )
-                        Button {
-                            viewModel.chooseDestination()
-                        } label: {
-                            Label("Choose Folder", systemImage: "folder")
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-
                     SidebarCard(title: "Media") {
-                        MediaFilterList(viewModel: viewModel)
-                        if viewModel.selectedKinds.isEmpty {
-                            Text("Nothing selected — the scan will look for every type.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        MediaPresetSelector(viewModel: viewModel)
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
@@ -232,19 +224,6 @@ private struct Sidebar: View {
                             set: { viewModel.fastScan = $0 }
                         ))
                         .help("Much faster, but may miss or truncate badly damaged files. Intact files are unaffected.")
-
-                        Toggle("Save as ZIP", isOn: Binding(
-                            get: { viewModel.saveAsZip },
-                            set: { viewModel.saveAsZip = $0 }
-                        ))
-
-                        if viewModel.saveAsZip {
-                            TextField("ZIP name (optional)", text: Binding(
-                                get: { viewModel.zipFileName },
-                                set: { viewModel.zipFileName = $0 }
-                            ))
-                            .textFieldStyle(.roundedBorder)
-                        }
 
                         Button {
                             viewModel.scanButtonPressed()
@@ -269,34 +248,6 @@ private struct Sidebar: View {
                             Text("“\(viewModel.filenameFilter)” will hide results that don't match. Clear it to see everything the scan finds.")
                         }
 
-                        Button {
-                            viewModel.recoverSelected()
-                        } label: {
-                            Label("Recover", systemImage: "arrow.down.doc")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .disabled(!viewModel.canRecover)
-
-                        if viewModel.isScanActive {
-                            HStack(spacing: 6) {
-                                Button {
-                                    viewModel.togglePause()
-                                } label: {
-                                    Label(
-                                        viewModel.state == .paused ? "Resume" : "Pause",
-                                        systemImage: viewModel.state == .paused ? "play.circle" : "pause.circle"
-                                    )
-                                    .frame(maxWidth: .infinity)
-                                }
-
-                                Button {
-                                    viewModel.cancelScan()
-                                } label: {
-                                    Label("Cancel", systemImage: "xmark.circle")
-                                        .frame(maxWidth: .infinity)
-                                }
-                            }
-                        }
                     }
 
                     SidebarCard(title: "File List") {
@@ -652,97 +603,124 @@ private struct ResultsView: View {
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
             }
+
+            if !viewModel.items.isEmpty {
+                Divider()
+                RecoveryActionBar(viewModel: viewModel)
+            }
         }
     }
 
     private var toolbar: some View {
-        HStack(spacing: 10) {
-            Text("Recoverable Media")
-                .font(.headline)
-            Spacer()
-            if !viewModel.items.isEmpty {
-                Picker("", selection: Binding(
-                    get: { viewModel.viewMode },
-                    set: { viewModel.viewMode = $0 }
-                )) {
-                    ForEach(ResultsViewMode.allCases) { mode in
-                        Image(systemName: mode.systemImage).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 90)
-                .labelsHidden()
-                .help("Switch between list and gallery")
-
-                Picker("", selection: Binding(
-                    get: { viewModel.recoveredVisibility },
-                    set: { viewModel.recoveredVisibility = $0 }
-                )) {
-                    ForEach(RecoveredVisibility.allCases) { visibility in
-                        Text(visibility.rawValue).tag(visibility)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 200)
-                .labelsHidden()
-
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(viewModel.items.isEmpty ? "Ready to Scan" : "Recovery Results")
+                        .font(.title2.weight(.semibold))
+                    Text(viewModel.sourceLabel ?? "Choose a source")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                    TextField("Filter by filename", text: Binding(
-                        get: { viewModel.filenameFilter },
-                        set: { viewModel.filenameFilter = $0 }
-                    ))
-                    .textFieldStyle(.plain)
-                    if !viewModel.filenameFilter.isEmpty {
-                        Button {
-                            viewModel.filenameFilter = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 20)
+
+                if !viewModel.items.isEmpty {
+                    HStack(spacing: 7) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("Search filenames", text: Binding(
+                            get: { viewModel.filenameFilter },
+                            set: { viewModel.filenameFilter = $0 }
+                        ))
+                        .textFieldStyle(.plain)
+                        if !viewModel.filenameFilter.isEmpty {
+                            Button {
+                                viewModel.filenameFilter = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .frame(maxWidth: 220)
-                .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .frame(width: 230)
+                    .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
 
-                Menu {
-                    Button("Select All") { viewModel.selectAllForRecovery() }
-                    Button("Select None") { viewModel.selectNoneForRecovery() }
-                } label: {
-                    Image(systemName: "checklist")
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 44)
-                .help(viewModel.duplicateCount > 0
-                      ? "Select All picks everything except \(viewModel.duplicateCount) duplicate\(viewModel.duplicateCount == 1 ? "" : "s")"
-                      : "Select or deselect every visible result")
-            }
+                    Picker("View", selection: Binding(
+                        get: { viewModel.viewMode },
+                        set: { viewModel.viewMode = $0 }
+                    )) {
+                        ForEach(ResultsViewMode.allCases) { mode in
+                            Image(systemName: mode.systemImage).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 86)
+                    .labelsHidden()
+                    .help("Switch between list and gallery")
 
-            Menu {
-                ForEach(AppearancePreference.allCases) { preference in
-                    Button {
-                        appearanceRaw = preference.rawValue
+                    Menu {
+                        Button("Select All Visible") { viewModel.selectAllForRecovery() }
+                        Button("Select None") { viewModel.selectNoneForRecovery() }
                     } label: {
-                        if preference.rawValue == appearanceRaw {
-                            Label(preference.label, systemImage: "checkmark")
-                        } else {
-                            Text(preference.label)
+                        Label("Selection", systemImage: "checklist")
+                    }
+                    .help(viewModel.duplicateCount > 0
+                          ? "Select All skips \(viewModel.duplicateCount) duplicate\(viewModel.duplicateCount == 1 ? "" : "s")"
+                          : "Select or deselect every visible result")
+                }
+
+                appearanceMenu
+            }
+
+            if !viewModel.items.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(RecoveredVisibility.allCases) { visibility in
+                        ResultsFilterChip(
+                            visibility: visibility,
+                            isSelected: viewModel.recoveredVisibility == visibility
+                        ) {
+                            viewModel.recoveredVisibility = visibility
                         }
                     }
+
+                    Spacer()
+
+                    if let filteredDetail {
+                        Text(filteredDetail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            } label: {
-                Image(systemName: (AppearancePreference(rawValue: appearanceRaw) ?? .system).systemImage)
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 40)
-            .help("Appearance")
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 14)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+    }
+
+    private var appearanceMenu: some View {
+        Menu {
+            ForEach(AppearancePreference.allCases) { preference in
+                Button {
+                    appearanceRaw = preference.rawValue
+                } label: {
+                    if preference.rawValue == appearanceRaw {
+                        Label(preference.label, systemImage: "checkmark")
+                    } else {
+                        Text(preference.label)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: (AppearancePreference(rawValue: appearanceRaw) ?? .system).systemImage)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 36)
+        .help("Appearance")
     }
 
     private var resultsTable: some View {
@@ -873,6 +851,220 @@ private struct ResultsView: View {
             .filter { viewModel.selectedRecoveryIDs.contains($0.id) }
             .reduce(UInt64(0)) { $0 + $1.byteLength }
         return ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+    }
+}
+
+private struct ResultsFilterChip: View {
+    let visibility: RecoveredVisibility
+    let isSelected: Bool
+    let action: () -> Void
+
+    private var systemImage: String {
+        switch visibility {
+        case .all: "square.grid.2x2"
+        case .unrecovered: "sparkles"
+        case .marked: "checkmark.square"
+        case .recovered: "checkmark.circle"
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Label(visibility.rawValue, systemImage: systemImage)
+                .font(.callout.weight(isSelected ? .semibold : .regular))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 6)
+                .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .background(
+                    isSelected ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.04),
+                    in: Capsule()
+                )
+                .overlay {
+                    Capsule()
+                        .strokeBorder(isSelected ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.06))
+                }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Persistent recovery queue: selection context, output format, and the one
+/// primary action stay visible while the user reviews a long list or gallery.
+private struct RecoveryActionBar: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+
+    private var selectedCount: Int { viewModel.selectedRecoveryIDs.count }
+
+    private var selectedSize: String? {
+        guard selectedCount > 0 else { return nil }
+        let bytes = viewModel.items.reduce(UInt64(0)) { total, item in
+            viewModel.selectedRecoveryIDs.contains(item.id) ? total + item.byteLength : total
+        }
+        return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    private var selectionLabel: String {
+        guard selectedCount > 0 else { return "No files selected" }
+        return "\(selectedCount.formatted()) file\(selectedCount == 1 ? "" : "s") selected"
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: selectedCount > 0 ? "checkmark.circle.fill" : "circle.dashed")
+                .font(.title2)
+                .foregroundStyle(selectedCount > 0 ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(selectionLabel)
+                    .font(.callout.weight(.semibold))
+                Text(selectedSize ?? "Mark files above to build your recovery queue")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 16)
+
+            if viewModel.saveAsZip {
+                TextField("ZIP name (optional)", text: Binding(
+                    get: { viewModel.zipFileName },
+                    set: { viewModel.zipFileName = $0 }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
+            }
+
+            Menu {
+                Button {
+                    viewModel.saveAsZip = false
+                } label: {
+                    Label("Recover as Files", systemImage: viewModel.saveAsZip ? "folder" : "checkmark")
+                }
+                Button {
+                    viewModel.saveAsZip = true
+                } label: {
+                    Label("Create ZIP Archive", systemImage: viewModel.saveAsZip ? "checkmark" : "archivebox")
+                }
+            } label: {
+                Label(viewModel.saveAsZip ? "ZIP Archive" : "Files", systemImage: viewModel.saveAsZip ? "archivebox" : "folder")
+            }
+            .help("Choose whether to recover individual files or one ZIP archive")
+
+            Button {
+                viewModel.recoverSelected()
+            } label: {
+                Label(
+                    selectedCount == 0
+                        ? "Recover Selected…"
+                        : "Recover \(selectedCount.formatted()) File\(selectedCount == 1 ? "" : "s")…",
+                    systemImage: "arrow.down.doc.fill"
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!viewModel.canRecover)
+            .help("Choose a destination and recover the selected files")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.regularMaterial)
+    }
+}
+
+/// Friendly presets cover normal scans; individual format toggles stay behind
+/// Custom so new users do not have to understand twelve container formats.
+private struct MediaPresetSelector: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+    @State private var showsCustomFormats = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                GridRow {
+                    presetButton(.photos)
+                    presetButton(.videos)
+                }
+                GridRow {
+                    presetButton(.photosAndVideos)
+                    presetButton(.everything)
+                }
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if viewModel.selectedMediaPreset == .custom {
+                        showsCustomFormats.toggle()
+                    } else {
+                        viewModel.selectMediaPreset(.custom)
+                        showsCustomFormats = true
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: MediaPreset.custom.systemImage)
+                    Text("Choose individual formats")
+                    Spacer()
+                    Image(systemName: showsCustomFormats && viewModel.selectedMediaPreset == .custom ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(viewModel.selectedMediaPreset == .custom ? .accentColor : nil)
+
+            if viewModel.selectedMediaPreset == .custom, showsCustomFormats {
+                Divider()
+                MediaFilterList(viewModel: viewModel)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+
+                if viewModel.selectedKinds.isEmpty {
+                    Label("Choose at least one format to scan.", systemImage: "exclamationmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } else {
+                Label {
+                    Text(viewModel.selectedMediaPreset.detail)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: viewModel.selectedMediaPreset == .everything ? "clock" : "checkmark.circle.fill")
+                        .foregroundStyle(viewModel.selectedMediaPreset == .everything ? .orange : .green)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func presetButton(_ preset: MediaPreset) -> some View {
+        let selected = viewModel.selectedMediaPreset == preset
+        return Button {
+            viewModel.selectMediaPreset(preset)
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: preset.systemImage)
+                    .font(.title3)
+                Text(preset.label)
+                    .font(.caption.weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+            .frame(maxWidth: .infinity, minHeight: 58)
+            .padding(.horizontal, 5)
+            .background(
+                selected ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.045),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(selected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.07))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(preset.label) media preset")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(preset.detail)
     }
 }
 

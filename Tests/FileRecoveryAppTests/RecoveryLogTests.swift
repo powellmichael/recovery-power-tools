@@ -424,6 +424,7 @@ private func tempLogURL() -> URL {
     @Test func emptySelectionMeansEveryKind() {
         let vm = RecoveryViewModel()
         #expect(vm.selectedKinds.isEmpty)
+        #expect(vm.selectedMediaPreset == .everything)
         #expect(vm.effectiveKinds == Set(MediaKind.allCases))
     }
 
@@ -431,6 +432,47 @@ private func tempLogURL() -> URL {
         let vm = RecoveryViewModel()
         vm.selectedKinds = [.jpeg, .png]
         #expect(vm.effectiveKinds == [.jpeg, .png])
+    }
+
+    @Test func photoPresetSelectsEveryImageKind() {
+        let vm = RecoveryViewModel()
+        vm.selectMediaPreset(.photos)
+
+        #expect(vm.selectedMediaPreset == .photos)
+        #expect(vm.effectiveKinds == Set(MediaCategory.images.kinds))
+        #expect(vm.effectiveKinds.isDisjoint(with: Set(MediaCategory.video.kinds)))
+    }
+
+    @Test func photosAndVideosLeavesOutArchives() {
+        let vm = RecoveryViewModel()
+        vm.selectMediaPreset(.photosAndVideos)
+
+        #expect(vm.effectiveKinds == Set(MediaCategory.images.kinds + MediaCategory.video.kinds))
+        #expect(!vm.effectiveKinds.contains(.zip))
+    }
+
+    @Test func customStartsTruthfullyWithEveryFormatChecked() {
+        let vm = RecoveryViewModel()
+        vm.selectMediaPreset(.custom)
+
+        #expect(vm.selectedMediaPreset == .custom)
+        #expect(vm.selectedKinds == Set(MediaKind.allCases))
+        vm.toggleKind(.mpeg)
+        #expect(!vm.effectiveKinds.contains(.mpeg))
+        #expect(vm.effectiveKinds.count == MediaKind.allCases.count - 1)
+    }
+
+    @Test func emptyCustomSelectionCannotStartAScan() {
+        let vm = RecoveryViewModel()
+        vm.target = .path(URL(fileURLWithPath: "/tmp/test-source"))
+        vm.selectMediaPreset(.custom)
+        for category in MediaCategory.allCases {
+            vm.setKinds(in: category, on: false)
+        }
+
+        #expect(vm.selectedKinds.isEmpty)
+        #expect(vm.effectiveKinds.isEmpty)
+        #expect(!vm.canScan)
     }
 }
 
@@ -447,6 +489,42 @@ private func tempLogURL() -> URL {
         vm.uncheckRecoveredFiles()
 
         #expect(vm.selectedRecoveryIDs == [c])
+    }
+}
+
+@MainActor
+@Suite struct SourceNavigationTests {
+    @Test func returningToLandingPreservesResultsUntilAnotherSourceIsChosen() throws {
+        let vm = RecoveryViewModel()
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("source-navigation-\(UUID().uuidString).bin")
+        try Data([0xFF, 0xD8, 0xFF, 0xE0]).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        vm.target = .path(sourceURL)
+        vm.items = [RecoveredItem(
+            kind: .jpeg,
+            source: try ScanSource(fileURL: sourceURL),
+            byteOffset: 10,
+            byteLength: 20,
+            fileExtension: "jpg",
+            originalFilename: nil
+        )]
+
+        vm.returnToSourceSelection()
+
+        #expect(vm.target == nil)
+        #expect(vm.items.count == 1)
+    }
+
+    @Test func cannotLeaveWhileRecoveryIsWriting() {
+        let vm = RecoveryViewModel()
+        let original = URL(fileURLWithPath: "/tmp/original-source")
+        vm.target = .path(original)
+        vm.state = .recovering
+
+        vm.returnToSourceSelection()
+
+        #expect(vm.target != nil)
     }
 }
 
@@ -797,7 +875,7 @@ private func tempLogURL() -> URL {
         try #require(items.count == 3)
 
         model.selectedRecoveryIDs = Set(items.map(\.id))
-        model.recoverSelected()
+        model.recoverSelected(to: destination)
         #expect(model.isHoldingRecoveryActivity, "held for the duration of the write")
 
         try await waitForFinish(model)
@@ -807,15 +885,16 @@ private func tempLogURL() -> URL {
         #expect(model.items.count { $0.recoveredURL != nil } == 3)
     }
 
-    /// A recovery refused for writing onto the source disk must not take the
-    /// token at all — it never reaches the completion path that releases it.
-    @Test func refusedRecoveryNeverTakesIt() async throws {
+    /// Cancelling the destination picker never reaches the write pipeline, so
+    /// it must not take a power assertion that would then have no release path.
+    @Test func cancelledDestinationNeverTakesIt() async throws {
         let (model, items, destination) = try await modelWithItems()
         defer { try? FileManager.default.removeItem(at: destination) }
 
         model.destinationURL = nil
         model.selectedRecoveryIDs = Set(items.map(\.id))
-        model.recoverSelected()
+        #expect(model.canRecover, "destination is chosen by the Recover action now")
+        model.recoverSelected(to: nil)
         #expect(model.isHoldingRecoveryActivity == false)
     }
 
@@ -827,7 +906,7 @@ private func tempLogURL() -> URL {
 
         model.startScanClock(resetTotal: true)
         model.selectedRecoveryIDs = Set(items.map(\.id))
-        model.recoverSelected()
+        model.recoverSelected(to: destination)
         #expect(model.isHoldingScanActivity)
         #expect(model.isHoldingRecoveryActivity)
 
