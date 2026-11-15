@@ -13,7 +13,12 @@ final class RecoveryViewModel: ObservableObject {
     /// preset. In Custom mode an empty selection really means no formats.
     @Published var selectedKinds: Set<MediaKind> = []
     @Published private(set) var selectedMediaPreset: MediaPreset = .everything
-    @Published var items: [RecoveredItem] = [] { didSet { filteredCache = nil } }
+    @Published var items: [RecoveredItem] = [] {
+        didSet {
+            filteredCache = nil
+            visibilityCountsCache = nil
+        }
+    }
     @Published var progress = ScanProgress()
     @Published var state: ScanState = .idle
     @Published var selectedItemID: RecoveredItem.ID?
@@ -53,7 +58,15 @@ final class RecoveryViewModel: ObservableObject {
 
     /// How many files the just-finished recovery wrote — drives the prompt text.
     var justRecoveredCount: Int { justRecoveredIDs.count }
-    @Published var viewMode: ResultsViewMode = .list
+    @Published private(set) var viewMode: ResultsViewMode = .list
+    /// Set once the user picks list or gallery themselves, so a later scan
+    /// doesn't override a stated preference with the preset's default.
+    private var userChoseViewMode = false
+
+    func setViewMode(_ mode: ResultsViewMode) {
+        viewMode = mode
+        userChoseViewMode = true
+    }
     @Published private(set) var thumbnails: [RecoveredItem.ID: NSImage] = [:]
     private var thumbnailsRequested: Set<RecoveredItem.ID> = []
 
@@ -98,6 +111,49 @@ final class RecoveryViewModel: ObservableObject {
             visible.sort(using: sortOrder)
         }
         return visible
+    }
+
+    /// How many results each filter chip would show. Cached like filteredItems
+    /// and for the same reason: the chips render on every pass, and counting
+    /// 200k items three times per render is what made large scans sluggish.
+    private var visibilityCountsCache: [RecoveredVisibility: Int]?
+
+    func count(for visibility: RecoveredVisibility) -> Int {
+        // Marked is just the selection's size, and the selection changes on
+        // every checkbox click, so it stays out of the cache.
+        if visibility == .marked { return selectedRecoveryIDs.count }
+        if let cached = visibilityCountsCache { return cached[visibility] ?? 0 }
+        var new = 0, recovered = 0
+        for item in items {
+            // Same rules as computeFilteredItems, so a chip's number always
+            // matches the rows it shows.
+            if item.previouslyRecovered || item.recoveredURL != nil || item.reviewMark == .recoveredElsewhere {
+                recovered += 1
+            } else if item.reviewMark == nil {
+                new += 1
+            }
+        }
+        let counts: [RecoveredVisibility: Int] = [.all: items.count, .unrecovered: new, .recovered: recovered]
+        visibilityCountsCache = counts
+        return counts[visibility] ?? 0
+    }
+
+    /// Rough time left, from the average rate so far. Nil until there is
+    /// enough of a run to extrapolate from: the first seconds are dominated by
+    /// the password prompt and filesystem parsing, not scanning.
+    static func remainingLabel(elapsed: TimeInterval, fraction: Double) -> String? {
+        guard elapsed >= 30, fraction >= 0.02, fraction < 1 else { return nil }
+        let remaining = elapsed * (1 - fraction) / fraction
+        if remaining < 60 { return "Less than a minute left" }
+        let minutes = Int((remaining / 60).rounded())
+        if minutes < 60 { return "About \(minutes) min left" }
+        let hours = minutes / 60, rest = minutes % 60
+        return rest == 0 ? "About \(hours) hr left" : "About \(hours) hr \(rest) min left"
+    }
+
+    var remainingScanLabel: String? {
+        guard state == .scanning else { return nil }
+        return Self.remainingLabel(elapsed: elapsedScanTime, fraction: progress.fraction)
     }
 
     /// What a finished scan found. Deliberately a frozen snapshot rather than
@@ -615,6 +671,11 @@ final class RecoveryViewModel: ObservableObject {
         scanNote = nil
         clearThumbnails()
         scanSummary = nil
+        // Photos and videos are recognised by eye, not by a carved filename,
+        // so those scans open in the gallery unless the user chose a view.
+        if !userChoseViewMode {
+            viewMode = selectedMediaPreset == .everything || selectedMediaPreset == .custom ? .list : .gallery
+        }
         state = .scanning
         startScanClock(resetTotal: true)
 
@@ -1131,6 +1192,18 @@ final class RecoveryViewModel: ObservableObject {
             showRecoveryCompletePrompt = true
         }
         state = .finished
+    }
+
+    /// Opens the recovery destination in Finder, selecting the ZIP when the
+    /// recovery wrote one.
+    func revealRecoveredFiles() {
+        let written = Set(justRecoveredIDs)
+        let urls = items.lazy.filter { written.contains($0.id) }.compactMap(\.recoveredURL)
+        if let first = urls.first, Set(urls).count == 1 {
+            NSWorkspace.shared.activateFileViewerSelecting([first])
+        } else if let destinationURL {
+            NSWorkspace.shared.open(destinationURL)
+        }
     }
 
     /// Test hook: stage a set as the just-recovered files.

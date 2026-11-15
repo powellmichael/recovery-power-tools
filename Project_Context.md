@@ -250,6 +250,39 @@ confirming the right tests failed: the filtered-cache invalidations and the
 recovery power-assertion release. A cache or an assertion that silently stops
 working is exactly the kind of thing a passing test can hide.
 
+## App Shell (phase 8, branch `phase-8-app-shell`)
+
+First milestone of the plan to make this a sellable app (three tools: Recover,
+Find Duplicates, Secure Erase; direct download; free scan, paid recovery).
+
+- **Home screen** (`HomeView.swift`) with one card per tool. Find Duplicates
+  and Secure Erase are shown as unavailable until they are built.
+- **Recover is now a straight line**, each step full-window: choose a source →
+  set up the scan (`ScanSetupView.swift`) → scanning → results. The settings
+  sidebar beside an empty results pane is gone.
+- **Quick / Deep** replaces the "Fast scan" toggle, with one wording everywhere.
+- **Results:** counts live in the filter chips (cached in
+  `RecoveryViewModel.count(for:)`), the stat chips are gone, and the scan note
+  is folded into the summary band. A More menu holds Scan Again, Choose
+  Another Source, Save Session and Open Session.
+- **Time remaining** during a scan, from the average rate so far.
+- **Gallery by default** for photo and video presets unless the user has
+  picked a view themselves.
+- **Recovery result sheet** with Show in Finder, replacing the alert.
+- **Menus and Settings:** File > Open/Save Session, a Recovery menu with
+  shortcuts, and appearance moved to Settings. The view model is owned by
+  `FileRecoveryApp` so commands can reach it.
+- `ContentView.swift` was split: results, gallery and preview are in
+  `ResultsViews.swift`, presets in `MediaSelectionViews.swift`.
+
+Layouts were checked by rendering each screen offscreen to an image. Not yet
+checked in the running app: the menu commands, the Settings window, and the
+password prompt following the new explainer.
+
+Still to come from the plan: recovery hardening (bad sectors, unmount,
+integrity badge, friendly names and dates), packaging and licensing, then the
+two new tools.
+
 ## Open UI Issues
 
 None currently open.

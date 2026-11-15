@@ -61,6 +61,9 @@ struct ScanningView: View {
                 HStack {
                     Text(viewModel.progress.percentLabel ?? "Preparing…")
                     Text("· \(viewModel.items.count.formatted()) found")
+                    if let remaining = viewModel.remainingScanLabel {
+                        Text("· \(remaining)")
+                    }
                     elapsedTime
                 }
                 .font(.caption)
@@ -167,6 +170,10 @@ struct ScanningView: View {
 
                 HStack {
                     Text(viewModel.progress.byteLabel ?? "Preparing…")
+                    if let remaining = viewModel.remainingScanLabel {
+                        Text("· \(remaining)")
+                            .help("Estimated from the speed so far. Files are spread unevenly, so this can change.")
+                    }
                     Spacer()
                     Text(viewModel.progress.currentPath)
                         .lineLimit(1)
@@ -186,11 +193,11 @@ struct ScanningView: View {
             Divider()
 
             HStack(spacing: 0) {
-                scanStat(value: "\(viewModel.items.count)", label: "Files found")
+                scanStat(value: viewModel.items.count.formatted(), label: "Files found")
                 Divider().frame(height: 42)
                 scanStat(value: viewModel.selectedMediaPreset.label, label: "Media")
                 Divider().frame(height: 42)
-                scanStat(value: viewModel.fastScan ? "Fast" : "Deep", label: "Scan mode")
+                scanStat(value: viewModel.fastScan ? "Quick" : "Deep", label: "Scan mode")
             }
         }
         .padding(24)

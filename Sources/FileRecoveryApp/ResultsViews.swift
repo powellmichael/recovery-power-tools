@@ -48,68 +48,37 @@ struct StatusBadge: View {
     }
 }
 
-/// Metric chip above the results: label over a number.
-struct StatChip: View {
-    let label: String
-    let value: String
-    var detail: String?
-    var tint: Color?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(tint ?? .secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(value)
-                    .font(.title3.weight(.medium))
-                    .monospacedDigit()
-                    .foregroundStyle(tint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
-                if let detail {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background((tint ?? Color.primary).opacity(tint == nil ? 0.05 : 0.1), in: RoundedRectangle(cornerRadius: 8))
-    }
-}
-
 /// Shown when a scan finishes, until dismissed. Deliberately not a modal: the
 /// scan runs for over an hour, so the user is usually away when it ends, and a
-/// dialog would have to be clicked away before the results underneath — which
-/// already say everything a summary dialog would — could be touched. The
-/// counts double as filter buttons, which is the part a modal couldn't do.
+/// dialog would have to be clicked away before the results underneath could be
+/// touched. Counts live in the filter chips; this band carries what they
+/// can't: how long the scan took, duplicates, and what was scanned.
 struct ScanSummaryBar: View {
     @ObservedObject var viewModel: RecoveryViewModel
     let summary: RecoveryViewModel.ScanSummary
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-            Text("Finished in \(RecoveryViewModel.elapsedLabel(summary.duration))")
-                .font(.callout.weight(.medium))
 
-            Divider().frame(height: 14)
-
-            countButton("\(summary.found.formatted()) found", .all)
-            if summary.new > 0 {
-                countButton("\(summary.new.formatted()) new", .unrecovered)
-            }
-            if summary.alreadyRecovered > 0 {
-                countButton("\(summary.alreadyRecovered.formatted()) already recovered", .recovered)
-            }
-            if summary.duplicates > 0 {
-                // Not a button: there's no duplicates-only view to jump to.
-                Text("\(summary.duplicates.formatted()) duplicates")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .help("Same first 4 KB and length as an earlier result. Select All skips these.")
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text("Scan finished in \(RecoveryViewModel.elapsedLabel(summary.duration))")
+                        .font(.callout.weight(.medium))
+                    if summary.duplicates > 0 {
+                        Text("· \(summary.duplicates.formatted()) duplicates, left out of Select All")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .help("These match an earlier result's first 4 KB and length. They stay in the list and can still be selected one by one.")
+                    }
+                }
+                if let note = viewModel.scanNote {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer()
@@ -122,29 +91,20 @@ struct ScanSummaryBar: View {
             }
             .buttonStyle(.plain)
             .help("Dismiss this summary")
+            .accessibilityLabel("Dismiss scan summary")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-    }
-
-    private func countButton(_ label: String, _ visibility: RecoveredVisibility) -> some View {
-        Button(label) { viewModel.recoveredVisibility = visibility }
-            .buttonStyle(.link)
-            .font(.callout)
-            .help("Show only these")
+        .padding(.vertical, 8)
     }
 }
 
 struct ResultsView: View {
     @ObservedObject var viewModel: RecoveryViewModel
-    @Binding var appearanceRaw: String
-
-    private var recoveredCount: Int {
-        viewModel.items.count { $0.recoveredURL != nil || $0.previouslyRecovered }
-    }
+    /// Returns to the setup step. Nil while a scan is running.
+    let scanAgain: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -152,36 +112,14 @@ struct ResultsView: View {
 
             Divider()
 
-            if !viewModel.items.isEmpty {
-                HStack(spacing: 10) {
-                    StatChip(label: "Found", value: "\(viewModel.items.count)", detail: filteredDetail)
-                    StatChip(label: "Selected", value: "\(viewModel.selectedRecoveryIDs.count)", detail: selectedSize)
-                    StatChip(
-                        label: "Recovered",
-                        value: "\(recoveredCount)",
-                        detail: viewModel.volumeHistoryCount > 0
-                            ? "of \(viewModel.volumeHistoryCount) ever on this drive"
-                            : nil,
-                        tint: recoveredCount > 0 ? .green : nil
-                    )
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+            if case .failed(let message) = viewModel.state {
+                NoticeBand(text: message, systemImage: "exclamationmark.triangle.fill", tint: .red)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
             }
 
             if let summary = viewModel.scanSummary {
                 ScanSummaryBar(viewModel: viewModel, summary: summary)
-            }
-
-            if let note = viewModel.scanNote {
-                Label(note, systemImage: "info.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.blue)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
             }
 
             if viewModel.items.isEmpty {
@@ -210,7 +148,7 @@ struct ResultsView: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.bottom, 10)
+                .padding(.vertical, 10)
             }
 
             if !viewModel.items.isEmpty {
@@ -224,7 +162,7 @@ struct ResultsView: View {
         VStack(spacing: 12) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(viewModel.items.isEmpty ? "Ready to Scan" : "Recovery Results")
+                    Text("Recovery Results")
                         .font(.title2.weight(.semibold))
                     Text(viewModel.sourceLabel ?? "Choose a source")
                         .font(.callout)
@@ -251,6 +189,7 @@ struct ResultsView: View {
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Clear search")
                         }
                     }
                     .padding(.horizontal, 10)
@@ -260,10 +199,12 @@ struct ResultsView: View {
 
                     Picker("View", selection: Binding(
                         get: { viewModel.viewMode },
-                        set: { viewModel.viewMode = $0 }
+                        set: { viewModel.setViewMode($0) }
                     )) {
                         ForEach(ResultsViewMode.allCases) { mode in
-                            Image(systemName: mode.systemImage).tag(mode)
+                            Image(systemName: mode.systemImage)
+                                .accessibilityLabel(mode == .gallery ? "Gallery" : "List")
+                                .tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -272,17 +213,33 @@ struct ResultsView: View {
                     .help("Switch between list and gallery")
 
                     Menu {
-                        Button("Select All Visible") { viewModel.selectAllForRecovery() }
+                        Button("Select All Shown") { viewModel.selectAllForRecovery() }
                         Button("Select None") { viewModel.selectNoneForRecovery() }
                     } label: {
                         Label("Selection", systemImage: "checklist")
                     }
                     .help(viewModel.duplicateCount > 0
                           ? "Select All skips \(viewModel.duplicateCount) duplicate\(viewModel.duplicateCount == 1 ? "" : "s")"
-                          : "Select or deselect every visible result")
+                          : "Select or deselect every result shown")
                 }
 
-                appearanceMenu
+                Menu {
+                    if let scanAgain {
+                        Button("Scan Again…", action: scanAgain)
+                        Button("Choose Another Source") { viewModel.returnToSourceSelection() }
+                            .disabled(!viewModel.canReturnToSourceSelection)
+                        Divider()
+                    }
+                    Button("Save Session…") { viewModel.exportManifest() }
+                        .disabled(viewModel.items.isEmpty)
+                    Button("Open Session…") { viewModel.importManifest() }
+                        .disabled(viewModel.isScanActive)
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Scan again, change source, or save these results as a session")
             }
 
             if !viewModel.items.isEmpty {
@@ -290,7 +247,11 @@ struct ResultsView: View {
                     ForEach(RecoveredVisibility.allCases) { visibility in
                         ResultsFilterChip(
                             visibility: visibility,
-                            isSelected: viewModel.recoveredVisibility == visibility
+                            count: viewModel.count(for: visibility),
+                            isSelected: viewModel.recoveredVisibility == visibility,
+                            help: visibility == .recovered && viewModel.volumeHistoryCount > 0
+                                ? "\(viewModel.volumeHistoryCount.formatted()) files have ever been recovered from this drive"
+                                : nil
                         ) {
                             viewModel.recoveredVisibility = visibility
                         }
@@ -298,7 +259,14 @@ struct ResultsView: View {
 
                     Spacer()
 
-                    if let filteredDetail {
+                    if let status = viewModel.manifestStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .help(status)
+                    } else if let filteredDetail {
                         Text(filteredDetail)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -311,27 +279,6 @@ struct ResultsView: View {
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
     }
 
-    private var appearanceMenu: some View {
-        Menu {
-            ForEach(AppearancePreference.allCases) { preference in
-                Button {
-                    appearanceRaw = preference.rawValue
-                } label: {
-                    if preference.rawValue == appearanceRaw {
-                        Label(preference.label, systemImage: "checkmark")
-                    } else {
-                        Text(preference.label)
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: (AppearancePreference(rawValue: appearanceRaw) ?? .system).systemImage)
-        }
-        .menuStyle(.borderlessButton)
-        .frame(width: 36)
-        .help("Appearance")
-    }
-
     private var resultsTable: some View {
         Table(viewModel.filteredItems, selection: Binding(
                         get: { viewModel.tableSelection },
@@ -341,7 +288,7 @@ struct ResultsView: View {
                         set: { viewModel.sortOrder = $0 }
                     )) {
                         TableColumn("") { item in
-                            Toggle("", isOn: Binding(
+                            Toggle("Recover \(item.displayName)", isOn: Binding(
                                 get: { viewModel.isSelectedForRecovery(item) },
                                 set: { viewModel.setSelectedForRecoveryRespectingSelection(item, isSelected: $0) }
                             ))
@@ -378,6 +325,7 @@ struct ResultsView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .help("Show preview")
+                                .accessibilityLabel("Preview \(item.displayName)")
                             }
                         }
                         .width(52)
@@ -414,7 +362,7 @@ struct ResultsView: View {
                                     help: "Same first 4 KB and size as an earlier result"
                                 )
                             } else {
-                                Text("Pending")
+                                Text("Not recovered yet")
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -428,6 +376,7 @@ struct ResultsView: View {
                             }
                             .buttonStyle(.plain)
                             .help("Show or hide details")
+                            .accessibilityLabel("Details for \(item.displayName)")
                         }
                         .width(48)
         }
@@ -453,19 +402,13 @@ struct ResultsView: View {
         guard visible != viewModel.items.count else { return nil }
         return "\(visible) shown"
     }
-
-    private var selectedSize: String? {
-        guard !viewModel.selectedRecoveryIDs.isEmpty else { return nil }
-        let total = viewModel.items
-            .filter { viewModel.selectedRecoveryIDs.contains($0.id) }
-            .reduce(UInt64(0)) { $0 + $1.byteLength }
-        return ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
-    }
 }
 
 struct ResultsFilterChip: View {
     let visibility: RecoveredVisibility
+    let count: Int
     let isSelected: Bool
+    var help: String? = nil
     let action: () -> Void
 
     private var systemImage: String {
@@ -479,7 +422,14 @@ struct ResultsFilterChip: View {
 
     var body: some View {
         Button(action: action) {
-            Label(visibility.rawValue, systemImage: systemImage)
+            Label {
+                Text(visibility.rawValue)
+                Text(count.formatted())
+                    .monospacedDigit()
+                    .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+            } icon: {
+                Image(systemName: systemImage)
+            }
                 .font(.callout.weight(isSelected ? .semibold : .regular))
                 .padding(.horizontal, 11)
                 .padding(.vertical, 6)
@@ -494,6 +444,9 @@ struct ResultsFilterChip: View {
                 }
         }
         .buttonStyle(.plain)
+        .help(help ?? "")
+        .accessibilityLabel("\(visibility.rawValue), \(count.formatted()) files")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -526,7 +479,7 @@ struct RecoveryActionBar: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(selectionLabel)
                     .font(.callout.weight(.semibold))
-                Text(selectedSize ?? "Mark files above to build your recovery queue")
+                Text(selectedSize ?? "Tick the files you want, then recover them to another drive")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -557,6 +510,14 @@ struct RecoveryActionBar: View {
                 Label(viewModel.saveAsZip ? "ZIP Archive" : "Files", systemImage: viewModel.saveAsZip ? "archivebox" : "folder")
             }
             .help("Choose whether to recover individual files or one ZIP archive")
+
+            if viewModel.state == .recovering {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Recovering…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
             Button {
                 viewModel.recoverSelected()
@@ -939,5 +900,63 @@ struct EmptyResultsView: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// What a finished recovery reports. It used to be an alert whose only
+/// question was whether to untick the files; the things a person actually
+/// wants next are to see the files and to know if any failed.
+struct RecoveryCompleteSheet: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+
+    private var recovered: Int { viewModel.justRecoveredCount }
+    private var failed: Int { viewModel.recoveryFailureCount }
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: failed > 0 ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 46))
+                .foregroundStyle(failed > 0 ? .orange : .green)
+                .accessibilityHidden(true)
+
+            VStack(spacing: 6) {
+                Text("Recovered \(recovered.formatted()) file\(recovered == 1 ? "" : "s")")
+                    .font(.title2.weight(.semibold))
+                if let destination = viewModel.destinationURL {
+                    Text("Saved to \(destination.path)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
+                }
+                if failed > 0 {
+                    Text("\(failed.formatted()) file\(failed == 1 ? "" : "s") could not be recovered. Each one shows its reason in the Status column.")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button("Show in Finder") {
+                    viewModel.revealRecoveredFiles()
+                }
+                Button("Untick Recovered Files") {
+                    viewModel.uncheckRecoveredFiles()
+                    viewModel.showRecoveryCompletePrompt = false
+                }
+                .help("Clear the ticks on the files just recovered, so they aren't recovered twice")
+                Button("Done") {
+                    viewModel.showRecoveryCompletePrompt = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .controlSize(.large)
+        }
+        .padding(28)
+        .frame(width: 460)
     }
 }
