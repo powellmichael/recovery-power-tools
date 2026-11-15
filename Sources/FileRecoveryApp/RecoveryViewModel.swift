@@ -313,6 +313,10 @@ final class RecoveryViewModel: ObservableObject {
         !selectedRecoveryIDs.isEmpty && !isScanActive && state != .recovering
     }
 
+    var canReturnToSourceSelection: Bool {
+        !isScanActive && state != .recovering
+    }
+
     var canPauseScan: Bool {
         pauseGate != nil && isScanActive
     }
@@ -320,7 +324,12 @@ final class RecoveryViewModel: ObservableObject {
     /// Warns when the user picked a folder on an external drive: folder scans
     /// inspect live files only, so deleted files will never appear.
     var sourceWarning: String? {
-        guard case .path(let url) = target,
+        guard case .path(let url) = target else { return nil }
+        // An image stored on an external drive contains the source disk's
+        // bytes, including unallocated space. Only folders need this warning.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
               let device = DeviceDiscovery.externalDevice(containing: url, in: externalDevices) else { return nil }
         return "This folder is on \(device.displayName). Folder scans only look inside existing files — deleted files will NOT be found. Use Choose Drive and pick that device to scan its free space for deleted files."
     }
@@ -353,6 +362,15 @@ final class RecoveryViewModel: ObservableObject {
 
     func chooseDevice(_ device: ExternalDevice) {
         setTarget(.device(device))
+    }
+
+    /// Returns to the landing page without discarding the current results.
+    /// They are cleared only after the user commits to a different source,
+    /// which avoids turning a navigation action into accidental data loss.
+    func returnToSourceSelection() {
+        guard canReturnToSourceSelection else { return }
+        target = nil
+        clearPreview()
     }
 
     func refreshDevices() {

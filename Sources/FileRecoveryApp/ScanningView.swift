@@ -2,9 +2,11 @@ import AppKit
 import SwiftUI
 
 /// A focused state for work that can run for hours. Configuration and results
-/// controls disappear so progress, pause, and cancellation are unambiguous.
+/// controls remain focused, with an optional live-results workspace.
 struct ScanningView: View {
     @ObservedObject var viewModel: RecoveryViewModel
+    var compact = false
+    var toggleResults: (() -> Void)? = nil
     @State private var showsCancelConfirmation = false
 
     private var isPaused: Bool { viewModel.state == .paused }
@@ -27,6 +29,56 @@ struct ScanningView: View {
     }
 
     var body: some View {
+        Group {
+            if compact {
+                compactProgress
+            } else {
+                focusedProgress
+            }
+        }
+        .confirmationDialog(
+            "Stop this scan?",
+            isPresented: $showsCancelConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Stop Scan", role: .destructive) {
+                viewModel.cancelScan()
+            }
+            Button("Keep Scanning", role: .cancel) {}
+        } message: {
+            Text("Files found so far will remain available, but the rest of the source will not be searched.")
+        }
+    }
+
+    private var compactProgress: some View {
+        HStack(spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                ProgressView(value: viewModel.progress.fraction)
+                    .tint(isPaused ? .orange : .accentColor)
+                HStack {
+                    Text(viewModel.progress.percentLabel ?? "Preparing…")
+                    Text("· \(viewModel.items.count.formatted()) found")
+                    elapsedTime
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let toggleResults {
+                Button("Show Scan Progress", action: toggleResults)
+                    .buttonStyle(.bordered)
+            }
+            controls
+        }
+        .padding(16)
+        .background(.regularMaterial)
+    }
+
+    private var focusedProgress: some View {
         ZStack {
             Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
@@ -42,6 +94,14 @@ struct ScanningView: View {
                 VStack(spacing: 28) {
                     statusHeader
                     progressCard
+                    if let toggleResults {
+                        Button(action: toggleResults) {
+                            Label("View Results (\(viewModel.items.count.formatted()))", systemImage: "photo.on.rectangle")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                        .disabled(viewModel.items.isEmpty)
+                    }
                     controls
 
                     Label("Read-only scan — the source drive is never modified", systemImage: "lock.shield.fill")
@@ -53,18 +113,6 @@ struct ScanningView: View {
                 .padding(.vertical, 64)
                 .frame(maxWidth: .infinity)
             }
-        }
-        .confirmationDialog(
-            "Stop this scan?",
-            isPresented: $showsCancelConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Stop Scan", role: .destructive) {
-                viewModel.cancelScan()
-            }
-            Button("Keep Scanning", role: .cancel) {}
-        } message: {
-            Text("Files found so far will remain available, but the rest of the source will not be searched.")
         }
     }
 

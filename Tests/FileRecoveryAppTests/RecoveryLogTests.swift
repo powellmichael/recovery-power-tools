@@ -492,6 +492,42 @@ private func tempLogURL() -> URL {
     }
 }
 
+@MainActor
+@Suite struct SourceNavigationTests {
+    @Test func returningToLandingPreservesResultsUntilAnotherSourceIsChosen() throws {
+        let vm = RecoveryViewModel()
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("source-navigation-\(UUID().uuidString).bin")
+        try Data([0xFF, 0xD8, 0xFF, 0xE0]).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        vm.target = .path(sourceURL)
+        vm.items = [RecoveredItem(
+            kind: .jpeg,
+            source: try ScanSource(fileURL: sourceURL),
+            byteOffset: 10,
+            byteLength: 20,
+            fileExtension: "jpg",
+            originalFilename: nil
+        )]
+
+        vm.returnToSourceSelection()
+
+        #expect(vm.target == nil)
+        #expect(vm.items.count == 1)
+    }
+
+    @Test func cannotLeaveWhileRecoveryIsWriting() {
+        let vm = RecoveryViewModel()
+        let original = URL(fileURLWithPath: "/tmp/original-source")
+        vm.target = .path(original)
+        vm.state = .recovering
+
+        vm.returnToSourceSelection()
+
+        #expect(vm.target != nil)
+    }
+}
+
 /// filteredItems is cached and invalidated by a didSet on each of its inputs.
 /// A missed invalidation shows stale rows with no error, so every input gets
 /// pinned here — including the one that is deliberately conditional.

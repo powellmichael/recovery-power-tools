@@ -94,13 +94,20 @@ than per byte, and there the filesystem has already said a file started there.
   test blobs. Folder scans skip live media/container files by extension. An
   orange warning appears when the chosen folder lives on an external drive,
   since folder scans can't see deleted data.
+- After choosing a source, the sidebar's **Choose Another Source** action
+  returns to the full landing page. Existing results are retained until the
+  user actually chooses a replacement source, and navigation is disabled
+  while recovery is writing.
 
 ## Features
 
 **Results and selection**
 
 - List view and gallery view (4-column thumbnail grid), switchable.
-- Filename filter, sortable Filename and Size columns, arrow-key navigation.
+- A focused results toolbar groups filename search, list/gallery switching,
+  selection commands, and the All / New / Marked / Recovered filters. The
+  active filter reads as a selected chip instead of another generic menu.
+- Sortable Filename and Size columns, plus arrow-key navigation.
 - Nothing is selected for recovery by default (bulk-export accidents).
 - Four-way visibility: All / New / Marked / Recovered. "Marked" shows only
   checkbox-selected rows; "Recovered" includes recovered-elsewhere, because
@@ -137,6 +144,9 @@ than per byte, and there the filesystem has already said a file started there.
 - Recover selected files, optionally as a named ZIP (`ditto -c -k --norsrc`).
   The destination is requested when Recover Selected is clicked instead of
   occupying permanent sidebar space before there is anything to recover.
+- A persistent recovery bar below the results shows the queued file count and
+  total size, keeps Files versus ZIP output beside the primary action, and
+  makes the destination-picker step explicit with an ellipsis.
 - Pause/resume mid-scan; cancel.
 - Recovery history persists across scans (volume serial + offset + length),
   so repeat scans show what was already recovered. The Recovered chip also
@@ -161,6 +171,10 @@ than per byte, and there the filesystem has already said a file started there.
   workspace while work is active. It shows percent, bytes, elapsed time, live
   files found, the media preset and scan mode, with focused Pause/Resume and
   Stop controls. Stopping requires confirmation and keeps partial findings.
+- View Results opens the live list/gallery and preview pane during a scan.
+  A compact progress bar retains elapsed time, percent, found count, Pause/Resume,
+  and Stop, plus Show Scan Progress to return to the focused screen. Recovery
+  stays disabled until scanning stops or completes.
 - Percent complete, bytes scanned, and elapsed time during a scan. Paused time
   is excluded from the timer, and the total survives completion so a finished
   scan still reports how long it took.
@@ -377,8 +391,9 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
    items were junk. Unverified: it needs eyes on recovered files.
 3. **Exercise Select All and a bulk recovery** at ~200k results. Those paths
    are O(items + selection) now, but that has never been run at this scale.
-4. **Continue the workflow redesign** with the results-toolbar and recovery
-   action-bar cleanup.
+4. **Field-test the redesigned workflow** at large-result scale: confirm the
+   landing, dedicated scanning state, filter toolbar, and persistent recovery
+   bar remain clear and responsive with a real recovery queue.
 5. **FAT32 deleted directory entries** for original filenames — the last
    filesystem still showing "Not Available". Worth it only if FAT32 volumes
    (SD cards, older USB sticks) are actually in scope. Note this pairs with the
