@@ -314,7 +314,17 @@ Done:
   `filteredItems`, so Select All Shown respects them. Cleared when another
   source is chosen, kept across a rescan. Chip counts ignore them.
 
-Not done yet: FAT32 filenames, timestamps from exFAT and NTFS directory entries,
+- **FAT32 filenames.** `FreeSpaceMap.fat32DeletedFiles` walks the directory
+  tree (live folders by FAT chain, deleted folders as contiguous clusters
+  that must still start with their "." entry) and returns deleted entries
+  with long names. A name that fits 8.3 has no long-name entry and loses its
+  first character on delete, so `IMG_0042.JPG` comes back as `_MG_0042.JPG`;
+  camera files are mostly named this way. Trusts the first-cluster high word,
+  which Windows zeroes on delete: above cluster 65,535 such a file is carved
+  without its name. Checked against a real macOS-made FAT32 image, not a
+  camera-formatted card or one deleted from in Windows.
+
+Not done yet: timestamps from exFAT and NTFS directory entries,
 names for carved videos, scan resume. The results list still shows
 "Not Available" for carved files until they are recovered. None of this has
 been tried on a drive with real bad sectors.
@@ -334,11 +344,8 @@ started at different x positions.
 
 ## Known Limitations / Deliberate Deferrals
 
-- **FAT32 filenames unavailable.** exFAT and NTFS both supply original names
-  from deleted directory entries; FAT32 doesn't yet. It needs its own parser
-  for the 8.3 + LFN `0xE5` format (~150 lines). Note that some FAT32
-  implementations zero the high cluster word on delete, so files above 4 GB or
-  fragmented ones may resolve poorly even with the name recovered.
+- **FAT32 short names lose their first character.** See Recovery Hardening.
+  Files deleted in Windows above cluster 65,535 are carved without a name.
 - **Fragmented files recover only on NTFS** (via data runs). FAT32/exFAT
   carving assumes contiguous data.
 - **No scan resume.** Importing a partial manifest gives results, not scan
@@ -463,11 +470,7 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
 4. **Field-test the redesigned workflow** at large-result scale: confirm the
    landing, dedicated scanning state, filter toolbar, and persistent recovery
    bar remain clear and responsive with a real recovery queue.
-5. **FAT32 deleted directory entries** for original filenames — the last
-   filesystem still showing "Not Available". Worth it only if FAT32 volumes
-   (SD cards, older USB sticks) are actually in scope. Note this pairs with the
-   landing page's SD Card Recovery category: SD cards are typically FAT32, so
-   that category is thin without this parser.
+5. ~~FAT32 deleted directory entries~~ — done in phase 9.
 6. **Scan resume** via a cursor in the manifest, if field testing shows
    manifests survive real-world use.
 7. App icon, signing, Xcode project — only when distribution matters.

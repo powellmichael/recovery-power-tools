@@ -79,4 +79,53 @@ import Testing
         let missing = ExternalDevice(identifier: "disk9999s9", volumeName: nil, size: 0, isWholeDisk: false)
         #expect(DeviceDiscovery.unmount(missing) != nil)
     }
+
+    /// The same end-to-end check on FAT32, which most SD cards use: a long
+    /// name in the root, one in a live folder, and one in a deleted folder.
+    @Test func recoversDeletedNamesFromRealFAT32Image() async throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fat32-integration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        let imageURL = workDir.appendingPathComponent("volume.dmg")
+
+        _ = try run("/usr/bin/hdiutil", ["create", "-size", "64m", "-fs", "MS-DOS FAT32", "-volname", "FRFAT", "-layout", "NONE", imageURL.path])
+        let attachOutput = try run("/usr/bin/hdiutil", ["attach", "-nobrowse", imageURL.path])
+        let mountPoint = try #require(
+            attachOutput.split(separator: "\n").compactMap { line -> String? in
+                guard let range = line.range(of: "/Volumes/") else { return nil }
+                return String(line[range.lowerBound...]).trimmingCharacters(in: .whitespaces)
+            }.first
+        )
+        let root = URL(fileURLWithPath: mountPoint)
+        func jpeg(_ fill: UInt8) -> Data {
+            Data([0xFF, 0xD8, 0xFF, 0xE0] + [UInt8](repeating: fill, count: 150_000) + [0xFF, 0xD9])
+        }
+        let kept = root.appendingPathComponent("Kept Folder", isDirectory: true)
+        let gone = root.appendingPathComponent("Deleted Folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: kept, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: gone, withIntermediateDirectories: true)
+        let files = [
+            root.appendingPathComponent("Summer Vacation 2021.jpg"),
+            kept.appendingPathComponent("birthday party.jpg"),
+            gone.appendingPathComponent("IMG_0042.JPG"),
+        ]
+        for (index, file) in files.enumerated() {
+            try jpeg(UInt8(0x11 + index)).write(to: file)
+        }
+        try FileManager.default.removeItem(at: files[0])
+        try FileManager.default.removeItem(at: files[1])
+        try FileManager.default.removeItem(at: gone)
+        _ = try run("/usr/bin/hdiutil", ["detach", mountPoint])
+
+        let scanner = RecoveryScanner()
+        let plan = try await scanner.makePlan(for: .path(imageURL))
+        #expect(plan.note?.contains("FAT32") == true)
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+        let names = Set(items.compactMap(\.originalFilename))
+        // IMG_0042.JPG fits 8.3, so it has no long-name entry, and FAT32
+        // overwrites a deleted short name's first character. "_" stands in.
+        #expect(names == ["Summer Vacation 2021.jpg", "birthday party.jpg", "_MG_0042.JPG"])
+        #expect(items.allSatisfy { $0.byteLength == 150_006 })
+    }
 }
