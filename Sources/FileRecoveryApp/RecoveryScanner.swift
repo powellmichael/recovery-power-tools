@@ -267,6 +267,7 @@ struct RecoveryScanner: Sendable {
         let start: Int
         let length: UInt64
         let ext: String?
+        var endGuessed = false
     }
 
     private func findCandidates(
@@ -309,14 +310,17 @@ struct RecoveryScanner: Sendable {
                 if let entry, entry.length > 0, byteOffset + entry.length <= regionEnd {
                     length = entry.length
                 }
-                results.append(item(
+                var found = item(
                     candidate.kind,
                     source: source,
                     byteOffset: byteOffset,
                     byteLength: length,
                     ext: candidate.ext,
                     directoryEntry: entry
-                ))
+                )
+                // A directory entry supplies the true size, so nothing is guessed.
+                found.endGuessed = candidate.endGuessed && entry == nil
+                results.append(found)
                 index = candidate.start + Int(min(length, UInt64(Int.max - candidate.start)))
             } else {
                 index += 1
@@ -399,7 +403,7 @@ struct RecoveryScanner: Sendable {
             // to the cap before giving up.
             if fastScan { return nil }
             guard let end = try findMarkerEnd(in: source, from: absolute + 3, limit: limit, marker: [0xFF, 0xD9]) else { return nil }
-            return Candidate(kind: .jpeg, start: index, length: end - absolute, ext: nil)
+            return Candidate(kind: .jpeg, start: index, length: end - absolute, ext: nil, endGuessed: true)
 
         case 0x89: // PNG
             guard kinds.contains(.png), match(bytes, index, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) else { return nil }

@@ -345,6 +345,19 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     /// Prefix-and-length hash, kept so a manifest can re-verify this data is
     /// still on the drive before recovering from recorded offsets.
     var fingerprint: String?
+    /// True when the file's end was guessed from an end marker because its
+    /// structure did not parse (Deep scan's fallback for damaged JPEGs).
+    var endGuessed = false
+
+    /// Shown as "May be damaged". Unreadable blocks are looked up live, since
+    /// most of a large file is first read at recovery time, not during the scan.
+    var mayBeDamaged: Bool {
+        if endGuessed { return true }
+        let ranges = segments ?? [byteOffset..<(byteOffset + byteLength)]
+        return ranges.contains { source.hasUnreadableData(in: $0) }
+    }
+
+    static let damagedHelp = "Part of this file could not be read or its end had to be guessed. It may open only partly, or not at all."
 
     var displayName: String {
         originalFilename

@@ -497,3 +497,72 @@ private func be32(_ value: UInt32) -> [UInt8] {
         #expect(RecoveryScanner.jpegMarkersAfterSOI[0xE1])  // EXIF
     }
 }
+
+@Suite struct BadSectorTests {
+    /// A structurally valid JPEG, so the length comes from the segment walk.
+    private func jpeg(entropy: Int) -> [UInt8] {
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10] + [UInt8](repeating: 0x11, count: 14)
+            + [0xFF, 0xDA, 0x00, 0x04, 0x01, 0x02]
+            + [UInt8](repeating: 0x33, count: entropy) + [0xFF, 0xD9]
+    }
+
+    @Test func scanContinuesPastUnreadableBlocks() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 65536)
+        let first = jpeg(entropy: 100)
+        let second = jpeg(entropy: 20000)
+        blob.replaceSubrange(8192..<(8192 + first.count), with: first)
+        blob.replaceSubrange(24576..<(24576 + second.count), with: second)
+
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try ScanSource(fileURL: url)
+        // One bad block in junk, one wholly inside the second JPEG's image data.
+        source.simulatedBadRanges = [16384..<20480, 28672..<32768]
+
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let scanner = RecoveryScanner()
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+            .sorted { $0.byteOffset < $1.byteOffset }
+
+        #expect(items.map(\.byteOffset) == [8192, 24576])
+        #expect(items.map(\.byteLength) == [UInt64(first.count), UInt64(second.count)])
+        #expect(source.unreadableBytes == 8192)
+        #expect(items.map(\.mayBeDamaged) == [false, true])
+
+        // Recovery writes zeros for the unreadable block and keeps the rest.
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bad-sector-out-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let recovered = [UInt8](try Data(contentsOf: scanner.recover(items[1], to: destination)))
+        var expected = second
+        expected.replaceSubrange(4096..<8192, with: [UInt8](repeating: 0, count: 4096))
+        #expect(recovered == expected)
+        // Re-reading the same bad block must not count it twice.
+        #expect(source.unreadableBytes == 8192)
+    }
+
+    /// A dead stretch is written off per 64 KB piece, and reads still succeed.
+    @Test func whollyUnreadablePieceIsZeroFilled() throws {
+        let url = try makeTempFile(Data([UInt8](repeating: 0xAA, count: 200_000)))
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try ScanSource(fileURL: url)
+        source.simulatedBadRanges = [0..<65536]
+        let data = [UInt8](try source.read(at: 0, count: 200_000))
+        #expect(data.count == 200_000)
+        #expect(data[..<65536].allSatisfy { $0 == 0 })
+        #expect(data[65536...].allSatisfy { $0 == 0xAA })
+        #expect(source.unreadableBytes == 65536)
+    }
+
+    @Test func deepScanFlagsGuessedJPEGEnd() async throws {
+        // The APP0 length is nonsense, so only the FFD9 fallback can end it.
+        let blob: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0] + [UInt8](repeating: 0x42, count: 50) + [0xFF, 0xD9]
+            + [UInt8](repeating: 0xAA, count: 100)
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let items = try await RecoveryScanner().scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+        #expect(items.first?.endGuessed == true)
+    }
+}

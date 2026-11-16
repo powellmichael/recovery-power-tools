@@ -11,6 +11,34 @@ final class ScanSource: @unchecked Sendable {
     private let fd: Int32
     private let alignment: UInt64
 
+    /// Start offsets of blocks that could not be read and were zero-filled.
+    /// A set, because the same bad block is hit again by length parsers,
+    /// fingerprinting and recovery, and must only be counted once.
+    private let badBlockLock = NSLock()
+    private var badBlocks: Set<UInt64> = []
+    /// Test hook: reads touching these byte ranges fail with EIO, as a bad
+    /// sector does. Set before the source is used.
+    var simulatedBadRanges: [Range<UInt64>] = []
+
+    /// Smallest unit salvaged on its own. Raw devices must read whole blocks;
+    /// files have no such rule, so use the common 4 KB sector.
+    private var salvageUnit: UInt64 { alignment > 1 ? alignment : 4096 }
+    private static let salvagePiece: UInt64 = 64 * 1024
+
+    /// Bytes that could not be read so far and were replaced with zeros.
+    var unreadableBytes: UInt64 {
+        badBlockLock.withLock { UInt64(badBlocks.count) } * salvageUnit
+    }
+
+    /// True when any part of `range` was zero-filled because it was unreadable.
+    func hasUnreadableData(in range: Range<UInt64>) -> Bool {
+        let unit = salvageUnit
+        return badBlockLock.withLock {
+            // Empty on a healthy drive, so this is one check per call there.
+            !badBlocks.isEmpty && badBlocks.contains { $0 < range.upperBound && $0 + unit > range.lowerBound }
+        }
+    }
+
     init(fileURL: URL) throws {
         let fd = open(fileURL.path, O_RDONLY)
         guard fd >= 0 else { throw RecoveryError.cannotOpen(fileURL.path) }
@@ -54,11 +82,16 @@ final class ScanSource: @unchecked Sendable {
         let start = (offset / alignment) * alignment
         let end = min(size, ((offset + want + alignment - 1) / alignment) * alignment)
         var buffer = Data(count: Int(end - start))
-        let bytesRead = buffer.withUnsafeMutableBytes { raw in
-            pread(fd, raw.baseAddress, raw.count, off_t(start))
+        var bytesRead = buffer.withUnsafeMutableBytes { raw in
+            rawRead(raw.baseAddress, raw.count, at: start)
         }
-        guard bytesRead >= 0 else {
-            throw RecoveryError.readFailed(displayName, offset)
+        if bytesRead < 0 {
+            // EIO is a bad sector: salvage what surrounds it. Anything else
+            // (drive unplugged, fd revoked) still ends the scan.
+            guard errno == EIO else { throw RecoveryError.readFailed(displayName, offset) }
+            bytesRead = try buffer.withUnsafeMutableBytes { raw in
+                try salvage(into: raw, at: start, failedAt: offset)
+            }
         }
         let available = UInt64(bytesRead)
         let skip = offset - start
@@ -74,6 +107,83 @@ final class ScanSource: @unchecked Sendable {
             return buffer
         }
         return buffer.subdata(in: Int(skip)..<Int(skip + take))
+    }
+
+    private func rawRead(_ pointer: UnsafeMutableRawPointer?, _ count: Int, at offset: UInt64) -> Int {
+        if !simulatedBadRanges.isEmpty {
+            let span = offset..<(offset + UInt64(count))
+            if simulatedBadRanges.contains(where: { $0.overlaps(span) }) {
+                errno = EIO
+                return -1
+            }
+        }
+        return pread(fd, pointer, count, off_t(offset))
+    }
+
+    /// Re-reads a failed range in 64 KB pieces, then block by block inside any
+    /// piece that still fails. Unreadable blocks become zeros and are recorded,
+    /// so one bad sector costs one block instead of the whole scan.
+    /// Returns how many bytes of `raw` are valid (short only at end of source).
+    ///
+    /// ponytail: a piece whose first and last blocks both fail is written off
+    /// whole without probing the middle — a failing read can take seconds, and
+    /// a dead stretch of disk would otherwise stall the scan for hours. That
+    /// gives up at most 64 KB of readable data inside a bad patch. Probe every
+    /// block (as ddrescue's scraping pass does) if that ever matters.
+    private func salvage(into raw: UnsafeMutableRawBufferPointer, at start: UInt64, failedAt offset: UInt64) throws -> Int {
+        let total = raw.count
+        var bad: [UInt64] = []
+        defer {
+            if !bad.isEmpty { badBlockLock.withLock { badBlocks.formUnion(bad) } }
+        }
+
+        // Blocks and pieces sit on a fixed grid of absolute offsets. Files are
+        // read at arbitrary offsets, and blocks cut relative to each read would
+        // record one bad sector as several different "blocks".
+        let unit64 = salvageUnit
+        func gridEnd(_ position: Int, _ grid: UInt64, limit: Int) -> Int {
+            let absolute = start + UInt64(position)
+            return min(limit, position + Int((absolute / grid + 1) * grid - absolute))
+        }
+
+        /// Reads the block starting at `position`; zero-fills and records it
+        /// when unreadable.
+        func readBlock(_ position: Int, end: Int, probe: Bool = true) throws -> Bool {
+            if probe {
+                let got = rawRead(raw.baseAddress! + position, end - position, at: start + UInt64(position))
+                if got >= 0 { return true }
+                guard errno == EIO else { throw RecoveryError.readFailed(displayName, offset) }
+            }
+            memset(raw.baseAddress! + position, 0, end - position)
+            bad.append((start + UInt64(position)) / unit64 * unit64)
+            return false
+        }
+
+        var position = 0
+        while position < total {
+            let pieceEnd = gridEnd(position, Self.salvagePiece, limit: total)
+            let got = rawRead(raw.baseAddress! + position, pieceEnd - position, at: start + UInt64(position))
+            if got >= 0 {
+                if got < pieceEnd - position { return position + got }
+            } else {
+                guard errno == EIO else { throw RecoveryError.readFailed(displayName, offset) }
+                var blocks: [Range<Int>] = []
+                var cursor = position
+                while cursor < pieceEnd {
+                    let end = gridEnd(cursor, unit64, limit: pieceEnd)
+                    blocks.append(cursor..<end)
+                    cursor = end
+                }
+                let firstOK = try readBlock(blocks[0].lowerBound, end: blocks[0].upperBound)
+                let last = blocks[blocks.count - 1]
+                let lastOK = blocks.count > 1 ? try readBlock(last.lowerBound, end: last.upperBound) : firstOK
+                for block in blocks.dropFirst().dropLast() {
+                    _ = try readBlock(block.lowerBound, end: block.upperBound, probe: firstOK || lastOK)
+                }
+            }
+            position = pieceEnd
+        }
+        return total
     }
 
     // MARK: - authopen

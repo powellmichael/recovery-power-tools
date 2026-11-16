@@ -73,6 +73,15 @@ struct ScanSummaryBar: View {
                             .help("These match an earlier result's first 4 KB and length. They stay in the list and can still be selected one by one.")
                     }
                 }
+                if summary.unreadableBytes > 0 {
+                    Label(
+                        "\(ByteCountFormatter.string(fromByteCount: Int64(summary.unreadableBytes), countStyle: .file)) of this drive could not be read. The scan carried on past it; files touching those areas are marked “May be damaged”. A drive with unreadable areas may be failing, so recover what you need soon.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
                 if let note = viewModel.scanNote {
                     Text(note)
                         .font(.caption)
@@ -338,7 +347,12 @@ struct ResultsView: View {
 
                         TableColumn("Status") { item in
                             if let recoveredURL = item.recoveredURL {
-                                StatusBadge(text: recoveredURL.lastPathComponent, tint: .green)
+                                // Recovered, but with zero-filled gaps or a guessed end.
+                                StatusBadge(
+                                    text: recoveredURL.lastPathComponent,
+                                    tint: item.mayBeDamaged ? .orange : .green,
+                                    help: item.mayBeDamaged ? "Recovered. " + RecoveredItem.damagedHelp : nil
+                                )
                             } else if let recoveryError = item.recoveryError {
                                 StatusBadge(text: recoveryError, tint: .red, help: recoveryError)
                             } else if item.previouslyRecovered {
@@ -361,6 +375,8 @@ struct ResultsView: View {
                                     tint: .purple,
                                     help: "Same first 4 KB and size as an earlier result"
                                 )
+                            } else if item.mayBeDamaged {
+                                StatusBadge(text: "May be damaged", tint: .orange, help: RecoveredItem.damagedHelp)
                             } else {
                                 Text("Not recovered yet")
                                     .foregroundStyle(.secondary)
@@ -623,6 +639,8 @@ struct GalleryCell: View {
                 } else if item.isDuplicate {
                     StatusBadge(text: "Duplicate", tint: .purple,
                                 help: "Same first 4 KB and size as an earlier result")
+                } else if item.mayBeDamaged {
+                    StatusBadge(text: "May be damaged", tint: .orange, help: RecoveredItem.damagedHelp)
                 }
             }
         }

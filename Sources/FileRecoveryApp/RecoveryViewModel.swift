@@ -166,6 +166,8 @@ final class RecoveryViewModel: ObservableObject {
         var duplicates: Int
         var alreadyRecovered: Int
         var new: Int
+        /// Bytes the drive could not read (bad sectors), zero-filled.
+        var unreadableBytes: UInt64 = 0
     }
 
     /// Non-nil from the end of a scan until dismissed or the next scan starts.
@@ -719,6 +721,8 @@ final class RecoveryViewModel: ObservableObject {
                     self.pauseGate = nil
                     self.stopScanClock()
                     self.scanSummary = Self.summarize(self.items, duration: self.elapsedScanTime)
+                    self.scanSummary?.unreadableBytes = Set(plan.regions.map(\.source))
+                        .reduce(0) { $0 + $1.unreadableBytes }
                     self.state = .finished
                     self.announceCompletion()
                 }
