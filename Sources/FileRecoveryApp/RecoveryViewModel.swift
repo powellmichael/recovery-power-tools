@@ -2,6 +2,7 @@ import AVKit
 import AppKit
 import Foundation
 import ImageIO
+import LicenseKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -402,10 +403,68 @@ final class RecoveryViewModel: ObservableObject {
     }
     private let scanner = RecoveryScanner()
 
+    // MARK: - Licence
+
+    /// Scanning and previewing are free; writing recovered files is what a
+    /// licence unlocks. One gate, in recoverSelected.
+    ///
+    /// Nil means this build has no licence key configured, which is every
+    /// `swift run` development build: recovery is then unlocked. `make app`
+    /// writes the key into the bundle's Info.plist.
+    ///
+    /// ponytail: a determined user can patch the check or swap the key and
+    /// re-sign the app. That is true of every offline licence scheme; this
+    /// keeps honest customers honest and no more.
+    let licensePublicKey: Data?
+    private let licenseDefaults: UserDefaults
+    private static let licenseDefaultsKey = "licenseKey"
+    @Published private(set) var license: License?
+    @Published var showLicensePrompt = false
+
+    var isRecoveryUnlocked: Bool { licensePublicKey == nil || license != nil }
+
+    nonisolated static var bundledLicensePublicKey: Data? {
+        (Bundle.main.object(forInfoDictionaryKey: "RPTLicensePublicKey") as? String)
+            .flatMap { $0.isEmpty ? nil : Data(base64Encoded: $0) }
+    }
+
+    /// Where to buy a licence, when the build names a store page.
+    nonisolated static var purchaseURL: URL? {
+        (Bundle.main.object(forInfoDictionaryKey: "RPTPurchaseURL") as? String)
+            .flatMap { $0.isEmpty ? nil : URL(string: $0) }
+    }
+
+    /// Returns false when the key is not valid for this app.
+    @discardableResult
+    func activateLicense(_ key: String) -> Bool {
+        guard let licensePublicKey, let verified = LicenseCodec.verify(key, publicKey: licensePublicKey) else {
+            return false
+        }
+        license = verified
+        licenseDefaults.set(key, forKey: Self.licenseDefaultsKey)
+        showLicensePrompt = false
+        return true
+    }
+
+    func removeLicense() {
+        license = nil
+        licenseDefaults.removeObject(forKey: Self.licenseDefaultsKey)
+    }
+
     init(
         recoveryLogURL: URL = RecoveryLog.defaultURL,
-        reviewLogURL: URL = ReviewLog.defaultURL
+        reviewLogURL: URL = ReviewLog.defaultURL,
+        licensePublicKey: Data? = RecoveryViewModel.bundledLicensePublicKey,
+        licenseDefaults: UserDefaults = .standard
     ) {
+        self.licensePublicKey = licensePublicKey
+        self.licenseDefaults = licenseDefaults
+        // Re-verified on every launch, so a stored key that no longer checks
+        // out (edited, or from another build's key) simply stops counting.
+        if let licensePublicKey, let stored = licenseDefaults.string(forKey: Self.licenseDefaultsKey) {
+            license = LicenseCodec.verify(stored, publicKey: licensePublicKey)
+        }
+
         // Injectable so tests can run the full scan-recover-rescan pipeline
         // without touching the real history files.
         recoveryLog = RecoveryLog.load(from: recoveryLogURL)
@@ -1226,6 +1285,11 @@ final class RecoveryViewModel: ObservableObject {
 
     func recoverSelected() {
         guard canRecover else { return }
+        // Ask before the save panel, not after the user has picked a folder.
+        guard isRecoveryUnlocked else {
+            showLicensePrompt = true
+            return
+        }
         recoverSelected(to: chooseDestination())
     }
 
@@ -1233,6 +1297,10 @@ final class RecoveryViewModel: ObservableObject {
     /// testable while the user-facing action always asks where to save.
     func recoverSelected(to chosenDestination: URL?) {
         guard canRecover, let destinationURL = chosenDestination else { return }
+        guard isRecoveryUnlocked else {
+            showLicensePrompt = true
+            return
+        }
         self.destinationURL = destinationURL
         if case .device(let device) = target,
            DeviceDiscovery.destination(destinationURL, isOnSameDiskAs: device) {

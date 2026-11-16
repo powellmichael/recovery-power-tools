@@ -355,6 +355,42 @@ bad-sector handling has met a drive with real bad sectors. Scan resume is
 tested on files and through the view model, not on a real device across an
 app restart.
 
+## Licensing and Packaging (phase 10, branch `phase-10-licensing-packaging`, in progress)
+
+Done:
+
+- **Three SwiftPM targets.** `LicenseKit` (licence format, shared), the app,
+  and `LicenseTool` (seller's side, never shipped). `make run` now names the
+  `FileRecovery` product because the package has two executables.
+- **Licence keys.** `RPT1.<details>.<signature>`, Ed25519 via CryptoKit,
+  verified offline against a public key. Details are name, email and issue
+  date. No server, no activation limit, no revocation.
+- **The gate.** `RecoveryViewModel.isRecoveryUnlocked` is checked in both
+  `recoverSelected` entry points; a locked copy shows `LicenseSheet` instead
+  of writing. Scanning, preview and saving sessions stay free. The key is
+  kept in UserDefaults and re-verified each launch. Settings has a Licence
+  section.
+- **Development builds are unlocked.** The public key comes from the
+  bundle's Info.plist (`RPTLicensePublicKey`), which `swift run` builds do
+  not have.
+- **`make license-keys`** creates the signing key at
+  `~/.recovery-power-tools/license-signing.key` (0600, never overwritten) and
+  writes `license-public.key` in the repo. `swift run LicenseTool issue
+  "Name" email` prints a customer's key. Not run yet: no real key exists.
+- **`make app`** (`Scripts/make-app.sh`) builds
+  `dist/Recovery Power Tools.app` with an Info.plist and hardened runtime.
+  Ad-hoc signed unless `SIGN_IDENTITY` names a Developer ID. Warns when no
+  licence key is configured.
+- **`make notarize`** (`Scripts/notarize.sh`) submits, staples and zips.
+  Refuses a build without a Developer ID signature or without a licence key.
+  Never run for real: this Mac has no signing identity.
+
+Not done: the raw-device (`authopen`) check in a signed hardened build, a
+Developer ID and notarization run, an app icon (`Resources/AppIcon.icns` is
+picked up if present), the store (Paddle or Lemon Squeezy) and automatic key
+delivery, Sparkle updates, EULA and privacy policy. The bundle identifier
+`com.recoverypowertools.app` is a placeholder.
+
 ## Open UI Issues
 
 None currently open.
@@ -550,7 +586,7 @@ The pre-phase-7 equivalent of that first scan would have taken ~26 hours.
 
 ## Environment Notes
 
-- **Always run a release build: `make run` (or `swift run -c release`)** — see
+- **Always run a release build: `make run` (or `swift run -c release FileRecovery`)** — see
   Measured Performance for why it is ~25x. `make test` stays in debug on
   purpose, to keep assertions and overflow checks on.
 - `FileRecoveryApp.init()` calls

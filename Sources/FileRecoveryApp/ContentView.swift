@@ -81,6 +81,12 @@ struct ContentView: View {
         )) {
             RecoveryCompleteSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: Binding(
+            get: { viewModel.showLicensePrompt },
+            set: { viewModel.showLicensePrompt = $0 }
+        )) {
+            LicenseSheet(viewModel: viewModel)
+        }
         .preferredColorScheme(appearance.colorScheme)
     }
 
