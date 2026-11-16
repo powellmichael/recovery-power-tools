@@ -385,8 +385,12 @@ Done:
   Refuses a build without a Developer ID signature or without a licence key.
   Never run for real: this Mac has no signing identity.
 
-Not done: the raw-device (`authopen`) check in a signed hardened build, a
-Developer ID and notarization run, an app icon (`Resources/AppIcon.icns` is
+- **Raw drive access works under the hardened runtime.** Field-checked on
+  2026-11-16: the ad-hoc signed `make app` bundle prompted for the password
+  and scanned an external drive. Still to confirm on a Developer ID signed,
+  notarized build on a Mac that never had the dev build.
+
+Not done: a Developer ID and notarization run, an app icon (`Resources/AppIcon.icns` is
 picked up if present), the store (Paddle or Lemon Squeezy) and automatic key
 delivery, Sparkle updates, EULA and privacy policy. The bundle identifier
 `com.recoverypowertools.app` is a placeholder.
