@@ -8,6 +8,8 @@ struct DeletedFileEntry: Sendable, Equatable {
     /// Disk byte ranges holding the data when the file was fragmented
     /// (NTFS data runs); nil means a single contiguous range at the key offset.
     var segments: [Range<UInt64>]? = nil
+    /// Last-modified time from the directory entry, when it holds a valid one.
+    var modified: Date? = nil
 }
 
 /// Free (unallocated) byte regions of a volume. Anything carved from these
@@ -80,7 +82,145 @@ struct FreeSpaceMap: Sendable {
         }
 
         let regions = mergedRegions(freeClusters: freeClusters, dataStart: dataStart, clusterBytes: clusterBytes, deviceSize: source.size)
-        return FreeSpaceMap(filesystem: "FAT32", regions: regions, volumeSerial: UInt64(le32(boot, 67)))
+        // A failure here only costs the original names; carving still works.
+        let deletedFiles = (try? fat32DeletedFiles(
+            source,
+            fatStart: fatStart,
+            dataStart: dataStart,
+            clusterBytes: clusterBytes,
+            clusterCount: clusterCount,
+            rootDirCluster: UInt64(le32(boot, 44))
+        )) ?? [:]
+        return FreeSpaceMap(filesystem: "FAT32", regions: regions, deletedFiles: deletedFiles, volumeSerial: UInt64(le32(boot, 67)))
+    }
+
+    /// Walks the FAT32 directory tree collecting deleted entries (first name
+    /// byte 0xE5), which keep the file's size and first cluster. The long
+    /// name survives in the entries just before it; without one, only the 8.3
+    /// name is left and its first character is gone.
+    ///
+    /// Deleting a file zeroes its FAT chain, so the data is taken to be one
+    /// contiguous run from the first cluster, as for exFAT.
+    ///
+    /// ponytail: trusts the first-cluster high word. Windows zeroes it on
+    /// delete, so on a card last used in Windows a file above cluster 65,535
+    /// (past 2 GB at 32 KB clusters) points at the wrong place. The scanner
+    /// then finds no matching signature in free space there and drops the
+    /// name; the file is still carved, unnamed. Guess the high word from
+    /// neighbouring entries if that shows up in practice.
+    static func fat32DeletedFiles(
+        _ source: ScanSource,
+        fatStart: UInt64,
+        dataStart: UInt64,
+        clusterBytes: UInt64,
+        clusterCount: UInt64,
+        rootDirCluster: UInt64
+    ) throws -> [UInt64: DeletedFileEntry] {
+        func clusterAddress(_ n: UInt64) -> UInt64 { dataStart + (n - 2) * clusterBytes }
+        func isValidCluster(_ n: UInt64) -> Bool { n >= 2 && n < clusterCount + 2 }
+        func readCluster(_ n: UInt64) throws -> [UInt8] {
+            [UInt8](try source.read(at: clusterAddress(n), count: Int(clusterBytes)))
+        }
+
+        let maxClusters = 512 // ponytail: caps directories at 512 clusters
+        /// A live directory follows its FAT chain. A deleted one has no chain
+        /// left, so its clusters are taken as contiguous, and it must still
+        /// begin with its own "." entry or the cluster has been reused.
+        func directoryData(firstCluster: UInt64, deleted: Bool) throws -> [UInt8] {
+            var data: [UInt8] = []
+            if deleted {
+                var cluster = firstCluster
+                while isValidCluster(cluster), data.count < maxClusters * Int(clusterBytes) {
+                    let chunk = try readCluster(cluster)
+                    if data.isEmpty {
+                        guard chunk.count >= 32, chunk[0] == 0x2E, chunk[1] == 0x20, chunk[11] & 0x10 != 0 else { return [] }
+                    }
+                    data.append(contentsOf: chunk)
+                    // Stop at the end-of-directory marker instead of running
+                    // on into whatever follows on disk.
+                    if stride(from: 0, to: chunk.count - 31, by: 32).contains(where: { chunk[$0] == 0x00 }) { break }
+                    cluster += 1
+                }
+                return data
+            }
+            var cluster: UInt64? = firstCluster
+            var seen = Set<UInt64>()
+            while let current = cluster, isValidCluster(current), seen.insert(current).inserted, seen.count <= maxClusters {
+                data.append(contentsOf: try readCluster(current))
+                let entry = [UInt8](try source.read(at: fatStart + current * 4, count: 4))
+                cluster = entry.count == 4 ? UInt64(le32(entry, 0) & 0x0FFF_FFFF) : nil
+            }
+            return data
+        }
+
+        /// "IMG_0001JPG" plus the NT lowercase flags -> "IMG_0001.JPG".
+        func shortName(_ dir: [UInt8], at i: Int, deleted: Bool) -> String {
+            func part(_ range: Range<Int>, lowercase: Bool) -> String {
+                let text = (String(bytes: dir[range], encoding: .isoLatin1) ?? "")
+                    .trimmingCharacters(in: .whitespaces)
+                return lowercase ? text.lowercased() : text
+            }
+            var base = part(i..<i + 8, lowercase: dir[i + 12] & 0x08 != 0)
+            let ext = part(i + 8..<i + 11, lowercase: dir[i + 12] & 0x10 != 0)
+            // 0xE5 overwrote the first character; "_" is the usual stand-in.
+            if deleted, !base.isEmpty { base = "_" + base.dropFirst() }
+            return ext.isEmpty ? base : "\(base).\(ext)"
+        }
+
+        var results: [UInt64: DeletedFileEntry] = [:]
+        var queue: [(cluster: UInt64, deleted: Bool)] = [(rootDirCluster, false)]
+        var visitedDirs = Set<UInt64>()
+
+        while let directory = queue.popLast() {
+            guard visitedDirs.count < 4096, visitedDirs.insert(directory.cluster).inserted else { continue }
+            let dir = try directoryData(firstCluster: directory.cluster, deleted: directory.deleted)
+
+            // Long-name pieces seen since the last short entry. They are
+            // stored last piece first, each holding 13 UTF-16 units.
+            var longPieces: [[UInt16]] = []
+            var longChecksum: UInt8?
+            var i = 0
+            while i + 32 <= dir.count {
+                defer { i += 32 }
+                let first = dir[i]
+                if first == 0x00 { break } // end of directory
+                let attributes = dir[i + 11]
+                let isDeleted = first == 0xE5
+
+                if attributes & 0x3F == 0x0F { // long-name entry
+                    if longChecksum != dir[i + 13] { longPieces = [] }
+                    longChecksum = dir[i + 13]
+                    longPieces.append(([1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30] as [Int]).map {
+                        UInt16(dir[i + $0]) | UInt16(dir[i + $0 + 1]) << 8
+                    })
+                    continue
+                }
+                let pieces = longPieces
+                longPieces = []
+                longChecksum = nil
+
+                guard attributes & 0x08 == 0, first != 0x2E else { continue } // volume label, "." and ".."
+                let cluster = UInt64(le16(dir, i + 20)) << 16 | UInt64(le16(dir, i + 26))
+                guard isValidCluster(cluster) else { continue }
+
+                if attributes & 0x10 != 0 {
+                    queue.append((cluster, isDeleted || directory.deleted))
+                    continue
+                }
+                let length = UInt64(le32(dir, i + 28))
+                guard isDeleted, length > 0 else { continue }
+
+                var units = pieces.reversed().flatMap { $0 }
+                if let end = units.firstIndex(of: 0) { units.removeSubrange(end...) }
+                let longName = String(utf16CodeUnits: units, count: units.count)
+                let name = longName.isEmpty ? shortName(dir, at: i, deleted: true) : longName
+                guard !name.isEmpty else { continue }
+                // FAT stores local wall-clock time with no zone.
+                let modified = dosDate(date: le16(dir, i + 24), time: le16(dir, i + 22), utcOffsetMinutes: nil)
+                results[clusterAddress(cluster)] = DeletedFileEntry(name: name, length: length, modified: modified)
+            }
+        }
+        return results
     }
 
     // MARK: - exFAT
@@ -243,7 +383,13 @@ struct FreeSpaceMap: Sendable {
 
                 if isValidCluster(firstCluster) {
                     if isDeleted, !isDirectory, dataLength > 0, !name.isEmpty {
-                        results[clusterAddress(firstCluster)] = DeletedFileEntry(name: name, length: dataLength)
+                        // Byte 23 is the modified time's UTC offset in
+                        // quarter hours, valid only when its top bit is set.
+                        let zone = dir[i + 23]
+                        let offsetMinutes = zone & 0x80 != 0 ? Int(Int8(bitPattern: zone << 1) >> 1) * 15 : nil
+                        let stamp = le32(dir, i + 12)
+                        let modified = dosDate(date: stamp >> 16, time: stamp & 0xFFFF, utcOffsetMinutes: offsetMinutes)
+                        results[clusterAddress(firstCluster)] = DeletedFileEntry(name: name, length: dataLength, modified: modified)
                     } else if isDirectory {
                         // Live subdirectories, and deleted ones — their entry
                         // data often survives in free space.
@@ -278,6 +424,26 @@ struct FreeSpaceMap: Sendable {
         }
         closeRun(endingBefore: freeClusters.count)
         return regions
+    }
+
+    /// Decodes the packed date and time FAT and exFAT share. Nil for a zeroed
+    /// or impossible stamp. With no UTC offset the time is read as local,
+    /// which is how cameras and older systems write it.
+    static func dosDate(date: UInt32, time: UInt32, utcOffsetMinutes: Int?) -> Date? {
+        var parts = DateComponents()
+        parts.year = 1980 + Int(date >> 9 & 0x7F)
+        parts.month = Int(date >> 5 & 0x0F)
+        parts.day = Int(date & 0x1F)
+        parts.hour = Int(time >> 11 & 0x1F)
+        parts.minute = Int(time >> 5 & 0x3F)
+        parts.second = Int(time & 0x1F) * 2
+        guard (1...12).contains(parts.month!), (1...31).contains(parts.day!),
+              parts.hour! < 24, parts.minute! < 60, parts.second! < 60 else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        if let utcOffsetMinutes, let zone = TimeZone(secondsFromGMT: utcOffsetMinutes * 60) {
+            calendar.timeZone = zone
+        }
+        return calendar.date(from: parts)
     }
 
     private static func matchASCII(_ bytes: [UInt8], at index: Int, _ text: String) -> Bool {

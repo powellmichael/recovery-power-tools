@@ -147,3 +147,27 @@ import Testing
         #expect(bytes == jpegPart1 + jpegPart2)
     }
 }
+
+@Suite struct NTFSDateTests {
+    @Test func readsModifiedTimeFromStandardInformation() {
+        func record(ticks: UInt64) -> [UInt8] {
+            var r = [UInt8](repeating: 0, count: 256)
+            r[20] = 56                  // first attribute offset
+            r[56] = 0x10                // $STANDARD_INFORMATION
+            r[60] = 72                  // attribute length
+            r[76] = 24                  // content offset
+            for k in 0..<8 { r[56 + 24 + 8 + k] = UInt8(ticks >> (8 * UInt64(k)) & 0xFF) }
+            for k in 0..<4 { r[56 + 72 + k] = 0xFF } // end marker
+            return r
+        }
+        // 2021-06-05 10:11:12 UTC as 100 ns ticks since 1601.
+        let seconds: UInt64 = 1_622_887_872
+        let date = NTFS.modifiedDate(in: record(ticks: (seconds + 11_644_473_600) * 10_000_000))
+        #expect(date == Date(timeIntervalSince1970: TimeInterval(seconds)))
+        #expect(NTFS.modifiedDate(in: record(ticks: 0)) == nil)
+    }
+
+    @Test func zeroedDosStampIsNoDate() {
+        #expect(FreeSpaceMap.dosDate(date: 0, time: 0, utcOffsetMinutes: nil) == nil)
+    }
+}

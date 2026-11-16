@@ -154,6 +154,20 @@ struct ScanRegion: Sendable {
     let range: Range<UInt64>
 }
 
+/// Where to pick a stopped scan back up, and what it had already found.
+struct ScanResume: Sendable {
+    /// Absolute offset in the source; everything below it was searched.
+    var offset: UInt64
+    /// End of the furthest file already found that starts below `offset`.
+    /// Candidates below it are inside a known file, not new ones.
+    var floor: UInt64
+    /// Start offsets of results already held. The resume offset is rewound a
+    /// little for safety, so the last few files found are met again.
+    var knownOffsets: Set<UInt64>
+    /// Fingerprints of results already held, so duplicates are still caught.
+    var fingerprints: Set<String>
+}
+
 struct ScanPlan: Sendable {
     let regions: [ScanRegion]
     let note: String?
@@ -345,6 +359,21 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     /// Prefix-and-length hash, kept so a manifest can re-verify this data is
     /// still on the drive before recovering from recorded offsets.
     var fingerprint: String?
+    /// True when the file's end was guessed from an end marker because its
+    /// structure did not parse (Deep scan's fallback for damaged JPEGs).
+    var endGuessed = false
+    /// When the file was last modified, from its deleted directory entry.
+    var modifiedDate: Date?
+
+    /// Shown as "May be damaged". Unreadable blocks are looked up live, since
+    /// most of a large file is first read at recovery time, not during the scan.
+    var mayBeDamaged: Bool {
+        if endGuessed { return true }
+        let ranges = segments ?? [byteOffset..<(byteOffset + byteLength)]
+        return ranges.contains { source.hasUnreadableData(in: $0) }
+    }
+
+    static let damagedHelp = "Part of this file could not be read or its end had to be guessed. It may open only partly, or not at all."
 
     var displayName: String {
         originalFilename
@@ -400,6 +429,9 @@ struct ScanProgress: Sendable {
     var bytesScanned: UInt64 = 0
     var totalBytes: UInt64 = 0
     var currentPath: String = ""
+    /// Absolute offset the scan has read up to in the current source. Nil
+    /// until carving starts; a stopped scan resumes from just before it.
+    var position: UInt64? = nil
 
     var fraction: Double {
         guard totalBytes > 0 else { return 0 }

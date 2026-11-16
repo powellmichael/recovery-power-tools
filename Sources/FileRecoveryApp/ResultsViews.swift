@@ -73,6 +73,15 @@ struct ScanSummaryBar: View {
                             .help("These match an earlier result's first 4 KB and length. They stay in the list and can still be selected one by one.")
                     }
                 }
+                if summary.unreadableBytes > 0 {
+                    Label(
+                        "\(ByteCountFormatter.string(fromByteCount: Int64(summary.unreadableBytes), countStyle: .file)) of this drive could not be read. The scan carried on past it; files touching those areas are marked “May be damaged”. A drive with unreadable areas may be failing, so recover what you need soon.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
                 if let note = viewModel.scanNote {
                     Text(note)
                         .font(.caption)
@@ -122,12 +131,24 @@ struct ResultsView: View {
                 ScanSummaryBar(viewModel: viewModel, summary: summary)
             }
 
+            if viewModel.resumePoint != nil, !viewModel.isScanActive {
+                ResumeScanBand(viewModel: viewModel)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
+
             if viewModel.items.isEmpty {
                 EmptyResultsView()
             } else if viewModel.filteredItems.isEmpty {
                 // Results exist but the current view shows none — say why,
                 // because an unexplained empty list reads as lost data.
                 EmptyFilterExplanation(visibility: viewModel.recoveredVisibility)
+                    .overlay(alignment: .bottom) {
+                        if viewModel.hasResultFilters {
+                            Button("Clear Filters") { viewModel.clearResultFilters() }
+                                .padding(.bottom, 40)
+                        }
+                    }
             } else {
                 HSplitView {
                     Group {
@@ -211,6 +232,8 @@ struct ResultsView: View {
                     .frame(width: 86)
                     .labelsHidden()
                     .help("Switch between list and gallery")
+
+                    filterMenu
 
                     Menu {
                         Button("Select All Shown") { viewModel.selectAllForRecovery() }
@@ -338,7 +361,12 @@ struct ResultsView: View {
 
                         TableColumn("Status") { item in
                             if let recoveredURL = item.recoveredURL {
-                                StatusBadge(text: recoveredURL.lastPathComponent, tint: .green)
+                                // Recovered, but with zero-filled gaps or a guessed end.
+                                StatusBadge(
+                                    text: recoveredURL.lastPathComponent,
+                                    tint: item.mayBeDamaged ? .orange : .green,
+                                    help: item.mayBeDamaged ? "Recovered. " + RecoveredItem.damagedHelp : nil
+                                )
                             } else if let recoveryError = item.recoveryError {
                                 StatusBadge(text: recoveryError, tint: .red, help: recoveryError)
                             } else if item.previouslyRecovered {
@@ -361,6 +389,8 @@ struct ResultsView: View {
                                     tint: .purple,
                                     help: "Same first 4 KB and size as an earlier result"
                                 )
+                            } else if item.mayBeDamaged {
+                                StatusBadge(text: "May be damaged", tint: .orange, help: RecoveredItem.damagedHelp)
                             } else {
                                 Text("Not recovered yet")
                                     .foregroundStyle(.secondary)
@@ -397,10 +427,53 @@ struct ResultsView: View {
         }
     }
 
+    private static let sizeChoices: [(label: String, bytes: UInt64)] = [
+        ("Any size", 0), ("100 KB or larger", 100_000), ("1 MB or larger", 1_000_000),
+        ("10 MB or larger", 10_000_000), ("100 MB or larger", 100_000_000),
+    ]
+
+    private var filterMenu: some View {
+        Menu {
+            Picker("Type", selection: Binding(
+                get: { viewModel.kindFilter },
+                set: { viewModel.kindFilter = $0 }
+            )) {
+                Text("All types").tag(MediaKind?.none)
+                ForEach(viewModel.presentKinds) { kind in
+                    Text(kind.rawValue).tag(MediaKind?.some(kind))
+                }
+            }
+            Picker("Size", selection: Binding(
+                get: { viewModel.minimumSize },
+                set: { viewModel.minimumSize = $0 }
+            )) {
+                ForEach(Self.sizeChoices, id: \.bytes) { choice in
+                    Text(choice.label).tag(choice.bytes)
+                }
+            }
+            Toggle("Only Files With Their Original Name", isOn: Binding(
+                get: { viewModel.requiresOriginalName },
+                set: { viewModel.requiresOriginalName = $0 }
+            ))
+            Divider()
+            Button("Clear Filters") { viewModel.clearResultFilters() }
+                .disabled(!viewModel.hasResultFilters)
+        } label: {
+            Label(
+                "Filter",
+                systemImage: viewModel.hasResultFilters
+                    ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle"
+            )
+        }
+        .help(viewModel.hasResultFilters
+              ? "Filters are hiding some results"
+              : "Show only some types, larger files, or files with their original name")
+    }
+
     private var filteredDetail: String? {
         let visible = viewModel.filteredItems.count
         guard visible != viewModel.items.count else { return nil }
-        return "\(visible) shown"
+        return "\(visible.formatted()) shown"
     }
 }
 
@@ -623,6 +696,8 @@ struct GalleryCell: View {
                 } else if item.isDuplicate {
                     StatusBadge(text: "Duplicate", tint: .purple,
                                 help: "Same first 4 KB and size as an earlier result")
+                } else if item.mayBeDamaged {
+                    StatusBadge(text: "May be damaged", tint: .orange, help: RecoveredItem.damagedHelp)
                 }
             }
         }
@@ -851,7 +926,7 @@ struct EmptyFilterExplanation: View {
         switch visibility {
         case .all:
             ("line.3.horizontal.decrease.circle", "No results match",
-             "The filename filter hides every result.")
+             "The search or the filters hide every result.")
         case .unrecovered:
             ("checkmark.circle", "Nothing new here",
              "Every result is recovered, skipped, or marked as recovered elsewhere.")

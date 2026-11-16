@@ -130,3 +130,41 @@ private func makeJPEG(properties: [CFString: Any]) throws -> URL {
         #expect(progress.percentLabel == "100%")
     }
 }
+
+@Suite struct RecoveredNameTests {
+    /// Two carved copies of one photo: both take the capture time as their
+    /// name and file date, and the second does not overwrite the first.
+    @Test func carvedPhotoIsNamedAndDatedFromEXIF() async throws {
+        let jpegURL = try makeJPEG(properties: [
+            kCGImagePropertyExifDictionary: [
+                kCGImagePropertyExifDateTimeOriginal: "2021:06:05 10:11:12",
+            ] as [CFString: Any],
+        ])
+        defer { try? FileManager.default.removeItem(at: jpegURL) }
+        let jpeg = try Data(contentsOf: jpegURL)
+        let gap = Data(repeating: 0xAA, count: 512)
+        let imageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("name-test-\(UUID().uuidString).bin")
+        try (gap + jpeg + gap + jpeg + gap).write(to: imageURL)
+        defer { try? FileManager.default.removeItem(at: imageURL) }
+
+        let source = try ScanSource(fileURL: imageURL)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let scanner = RecoveryScanner()
+        let items = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+        #expect(items.count == 2)
+
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("name-test-out-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let urls = try items.map { try scanner.recover($0, to: destination) }
+        #expect(urls.map(\.lastPathComponent) == ["Photo 2021-06-05 10.11.12.jpg", "Photo 2021-06-05 10.11.12-2.jpg"])
+        #expect(try Data(contentsOf: urls[0]) == jpeg)
+
+        let modified = try #require(
+            try FileManager.default.attributesOfItem(atPath: urls[0].path)[.modificationDate] as? Date
+        )
+        let parts = Calendar.current.dateComponents([.year, .month, .day, .hour, .second], from: modified)
+        #expect([parts.year, parts.month, parts.day, parts.hour, parts.second] == [2021, 6, 5, 10, 12])
+    }
+}

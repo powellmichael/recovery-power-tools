@@ -176,6 +176,29 @@ enum DeviceDiscovery {
         return try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
     }
 
+    /// Unmounts a volume, or every volume on a whole disk, without ejecting it,
+    /// so the raw device stays available to scan. Never forced: if a file on
+    /// it is open, diskutil refuses and its message is returned.
+    /// Returns nil on success.
+    static func unmount(_ device: ExternalDevice) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        process.arguments = [device.isWholeDisk ? "unmountDisk" : "unmount", "/dev/\(device.identifier)"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+        } catch {
+            return "Could not run diskutil: \(error.localizedDescription)"
+        }
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        process.waitUntilExit()
+        guard process.terminationStatus != 0 else { return nil }
+        return output.isEmpty ? "The volume could not be unmounted." : output
+    }
+
     /// BSD partition name backing the volume that contains `path`, e.g. "disk4s1".
     static func bsdName(forPath path: String) -> String? {
         var fs = statfs()

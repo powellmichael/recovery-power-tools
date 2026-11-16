@@ -283,6 +283,78 @@ Still to come from the plan: recovery hardening (bad sectors, unmount,
 integrity badge, friendly names and dates), packaging and licensing, then the
 two new tools.
 
+## Recovery Hardening (phase 9, branch `phase-9-recovery-hardening`)
+
+Done:
+
+- **Bad sectors.** `ScanSource.read` no longer throws on `EIO`. It re-reads
+  the range in 64 KB pieces, then block by block, zero-fills what stays
+  unreadable and records the block in `badBlocks`. Blocks sit on a fixed grid
+  of absolute offsets so re-reads never count a sector twice. A piece whose
+  first and last blocks both fail is written off whole (a failing read can
+  take seconds). Any other errno, such as an unplugged drive, still ends the
+  scan. `simulatedBadRanges` is the test hook.
+- **Summary bar** reports `ScanSummary.unreadableBytes`.
+- **"May be damaged" badge.** `RecoveredItem.mayBeDamaged` is true when Deep
+  scan guessed a JPEG's end (`endGuessed`) or the item touches an unreadable
+  block. Looked up live, because most of a large file is first read at
+  recovery time. Not saved in a session file.
+- **Names and dates for carved photos.** `RecoveryScanner.recover` reads the
+  EXIF capture time after writing, renames to `Photo yyyy-MM-dd HH.mm.ss.ext`
+  and sets the file's dates. Images only; files with an original name keep it.
+
+- **Unmount offer.** The setup step shows an orange card when the chosen
+  drive has mounted volumes (`mountedTargetVolumes`), with a button that runs
+  `diskutil unmount` (or `unmountDisk` for a whole disk) through
+  `DeviceDiscovery.unmount`. Never forced; diskutil's refusal is shown.
+  Optional: a mounted drive can still be scanned.
+- **Result filters.** A Filter menu in the results toolbar: type, minimum
+  size, and "only files with their original name" (`kindFilter`,
+  `minimumSize`, `requiresOriginalName`). Applied in the cached
+  `filteredItems`, so Select All Shown respects them. Cleared when another
+  source is chosen, kept across a rescan. Chip counts ignore them.
+
+- **FAT32 filenames.** `FreeSpaceMap.fat32DeletedFiles` walks the directory
+  tree (live folders by FAT chain, deleted folders as contiguous clusters
+  that must still start with their "." entry) and returns deleted entries
+  with long names. A name that fits 8.3 has no long-name entry and loses its
+  first character on delete, so `IMG_0042.JPG` comes back as `_MG_0042.JPG`;
+  camera files are mostly named this way. Trusts the first-cluster high word,
+  which Windows zeroes on delete: above cluster 65,535 such a file is carved
+  without its name. Checked against a real macOS-made FAT32 image, not a
+  camera-formatted card or one deleted from in Windows.
+
+- **File dates from directory entries.** `DeletedFileEntry.modified` is
+  parsed on exFAT (with its UTC offset byte), FAT32 (local wall-clock time)
+  and NTFS (`$STANDARD_INFORMATION`), carried on `RecoveredItem.modifiedDate`,
+  saved in session files, and applied to the recovered file's created and
+  modified dates. Carved files with no entry still use EXIF, photos only.
+  FAT32 dates written by macOS can read back an hour out across a
+  daylight-saving change (seen in the FAT32 image test; macOS appears to
+  apply today's UTC offset when writing). The date is not shown in the
+  results list yet.
+
+- **Scan resume.** A scan that is stopped, or fails part-way (drive
+  unplugged), leaves `RecoveryViewModel.resumePoint`: the last reported
+  absolute offset rewound 1 MB, the fraction done, and the file types and
+  depth in use. Save Session writes it as the optional `resume` field;
+  Open Session restores it unless the volume differs. Resume Scan (results
+  and setup screens, Recovery menu) calls `resumeScan()`, which keeps the
+  results and passes a `ScanResume` to the scanner: regions below the offset
+  are skipped, results already held are stepped over (`knownOffsets`),
+  candidates inside a held file are ignored (`floor`), and duplicate
+  detection is seeded with held fingerprints. The offset is absolute, so it
+  survives the free-space map changing between sessions. Folder scans (many
+  sources) start over instead. Resuming asks for the password again, and the
+  "finished in" time covers only the resumed part.
+
+Phase 9 is complete as planned. Still open from it: the results list shows
+"Not Available" for carved files until they are recovered, carved videos get
+no real name or date, the modified date has no column, and none of the
+bad-sector handling has met a drive with real bad sectors. Scan resume is
+tested on files and through the view model, not on a real device across an
+app restart.
+
 ## Open UI Issues
 
 None currently open.
@@ -298,11 +370,8 @@ started at different x positions.
 
 ## Known Limitations / Deliberate Deferrals
 
-- **FAT32 filenames unavailable.** exFAT and NTFS both supply original names
-  from deleted directory entries; FAT32 doesn't yet. It needs its own parser
-  for the 8.3 + LFN `0xE5` format (~150 lines). Note that some FAT32
-  implementations zero the high cluster word on delete, so files above 4 GB or
-  fragmented ones may resolve poorly even with the name recovered.
+- **FAT32 short names lose their first character.** See Recovery Hardening.
+  Files deleted in Windows above cluster 65,535 are carved without a name.
 - **Fragmented files recover only on NTFS** (via data runs). FAT32/exFAT
   carving assumes contiguous data.
 - **No scan resume.** Importing a partial manifest gives results, not scan
@@ -427,13 +496,8 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
 4. **Field-test the redesigned workflow** at large-result scale: confirm the
    landing, dedicated scanning state, filter toolbar, and persistent recovery
    bar remain clear and responsive with a real recovery queue.
-5. **FAT32 deleted directory entries** for original filenames — the last
-   filesystem still showing "Not Available". Worth it only if FAT32 volumes
-   (SD cards, older USB sticks) are actually in scope. Note this pairs with the
-   landing page's SD Card Recovery category: SD cards are typically FAT32, so
-   that category is thin without this parser.
-6. **Scan resume** via a cursor in the manifest, if field testing shows
-   manifests survive real-world use.
+5. ~~FAT32 deleted directory entries~~ — done in phase 9.
+6. ~~Scan resume~~ — done in phase 9.
 7. App icon, signing, Xcode project — only when distribution matters.
 
 ## Measured Performance

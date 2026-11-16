@@ -17,6 +17,7 @@ final class RecoveryViewModel: ObservableObject {
         didSet {
             filteredCache = nil
             visibilityCountsCache = nil
+            presentKindsCache = nil
         }
     }
     @Published var progress = ScanProgress()
@@ -73,6 +74,34 @@ final class RecoveryViewModel: ObservableObject {
     /// Cleared by the didSet on every input below. Nil means "recompute".
     private var filteredCache: [RecoveredItem]?
 
+    // Result filters beyond the search box. Kept when a scan is repeated and
+    // cleared when another source is chosen.
+    @Published var kindFilter: MediaKind? { didSet { filteredCache = nil } }
+    /// In bytes; 0 means any size.
+    @Published var minimumSize: UInt64 = 0 { didSet { filteredCache = nil } }
+    @Published var requiresOriginalName = false { didSet { filteredCache = nil } }
+
+    var hasResultFilters: Bool {
+        kindFilter != nil || minimumSize > 0 || requiresOriginalName
+    }
+
+    func clearResultFilters() {
+        kindFilter = nil
+        minimumSize = 0
+        requiresOriginalName = false
+    }
+
+    /// File types present in the results, for the filter menu. Cached: the
+    /// toolbar re-renders often and this is a pass over every result.
+    private var presentKindsCache: [MediaKind]?
+    var presentKinds: [MediaKind] {
+        if let presentKindsCache { return presentKindsCache }
+        let present = Set(items.map(\.kind))
+        let ordered = MediaKind.allCases.filter(present.contains)
+        presentKindsCache = ordered
+        return ordered
+    }
+
     /// SwiftUI reads this several times per render pass, and so do the arrow
     /// keys, shift-click and Select All. Recomputing meant re-filtering and
     /// re-sorting the whole result set each time, so the cached value is what
@@ -102,6 +131,13 @@ final class RecoveryViewModel: ObservableObject {
             // file is recovered, just not by this tool.
             visible = visible.filter {
                 $0.previouslyRecovered || $0.recoveredURL != nil || $0.reviewMark == .recoveredElsewhere
+            }
+        }
+        if hasResultFilters {
+            let kind = kindFilter, minimum = minimumSize, named = requiresOriginalName
+            visible = visible.filter {
+                (kind == nil || $0.kind == kind) && $0.byteLength >= minimum
+                    && (!named || $0.originalFilename != nil)
             }
         }
         if !filenameFilter.isEmpty {
@@ -141,9 +177,12 @@ final class RecoveryViewModel: ObservableObject {
     /// Rough time left, from the average rate so far. Nil until there is
     /// enough of a run to extrapolate from: the first seconds are dominated by
     /// the password prompt and filesystem parsing, not scanning.
-    static func remainingLabel(elapsed: TimeInterval, fraction: Double) -> String? {
-        guard elapsed >= 30, fraction >= 0.02, fraction < 1 else { return nil }
-        let remaining = elapsed * (1 - fraction) / fraction
+    /// `startFraction` is where this run began: above 0 for a resumed scan,
+    /// whose elapsed time only covers the part scanned since.
+    static func remainingLabel(elapsed: TimeInterval, fraction: Double, startFraction: Double = 0) -> String? {
+        let covered = fraction - startFraction
+        guard elapsed >= 30, covered >= 0.02, fraction < 1 else { return nil }
+        let remaining = elapsed * (1 - fraction) / covered
         if remaining < 60 { return "Less than a minute left" }
         let minutes = Int((remaining / 60).rounded())
         if minutes < 60 { return "About \(minutes) min left" }
@@ -153,7 +192,56 @@ final class RecoveryViewModel: ObservableObject {
 
     var remainingScanLabel: String? {
         guard state == .scanning else { return nil }
-        return Self.remainingLabel(elapsed: elapsedScanTime, fraction: progress.fraction)
+        return Self.remainingLabel(
+            elapsed: elapsedScanTime, fraction: progress.fraction, startFraction: scanStartFraction
+        )
+    }
+
+    // MARK: - Resuming a stopped scan
+
+    /// Non-nil when a scan was stopped, or failed, part-way and the rest of
+    /// the drive can still be searched without starting over.
+    @Published private(set) var resumePoint: RecoveryManifest.Resume?
+    private var scanStartFraction: Double = 0
+    /// Settings of the scan that is running or last ran, which a resume must
+    /// reuse: other file types or depth would leave the first part unsearched.
+    private var activeScanKinds: Set<MediaKind> = []
+    private var activeScanFast = false
+
+    /// Rewound a little from the last reported position. Files starting in
+    /// the final stretch of a chunk are only picked up with the next one, so
+    /// resuming exactly at the reported offset could step over them.
+    private static let resumeMargin: UInt64 = 1024 * 1024
+
+    private func liveResumePoint() -> RecoveryManifest.Resume? {
+        guard let position = progress.position, position > Self.resumeMargin else { return nil }
+        return RecoveryManifest.Resume(
+            offset: position - Self.resumeMargin,
+            fraction: progress.fraction,
+            kinds: MediaKind.allCases.filter(activeScanKinds.contains),
+            fastScan: activeScanFast
+        )
+    }
+
+    var resumePercentLabel: String? {
+        resumePoint.map { "\(Int(($0.fraction * 100).rounded(.down)))%" }
+    }
+
+    /// Continues a stopped scan from where it left off, keeping its results.
+    func resumeScan() {
+        guard let point = resumePoint, !isScanActive, state != .recovering else { return }
+        flushPendingItems()
+        fastScan = point.fastScan
+        selectedKinds = Set(point.kinds)
+        selectedMediaPreset = .custom
+        let resume = ScanResume(
+            offset: point.offset,
+            floor: items.lazy.filter { $0.byteOffset < point.offset }.map { $0.byteOffset + $0.byteLength }.max() ?? 0,
+            knownOffsets: Set(items.map(\.byteOffset)),
+            fingerprints: Set(items.compactMap(\.fingerprint))
+        )
+        scanStartFraction = point.fraction
+        runScan(resume: resume)
     }
 
     /// What a finished scan found. Deliberately a frozen snapshot rather than
@@ -166,6 +254,8 @@ final class RecoveryViewModel: ObservableObject {
         var duplicates: Int
         var alreadyRecovered: Int
         var new: Int
+        /// Bytes the drive could not read (bad sectors), zero-filled.
+        var unreadableBytes: UInt64 = 0
     }
 
     /// Non-nil from the end of a scan until dismissed or the next scan starts.
@@ -201,8 +291,9 @@ final class RecoveryViewModel: ObservableObject {
     /// focused. A Notification Centre banner would be better, but that needs a
     /// bundle identifier and this ships as a bare SwiftPM executable.
     private func announceCompletion() {
-        guard !NSApp.isActive else { return }
-        NSApp.requestUserAttention(.criticalRequest)
+        // NSApp is nil when no application object exists, as under tests.
+        guard let app = NSApp, !app.isActive else { return }
+        app.requestUserAttention(.criticalRequest)
     }
 
     /// When the running segment of the current scan started, or nil when the
@@ -416,6 +507,40 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Unmounting
+
+    /// Mounted volumes on the chosen drive. A mounted volume can still be
+    /// written to by macOS (Spotlight, Trash, access times), and every write
+    /// may land on the deleted data the scan is looking for.
+    var mountedTargetVolumes: [ExternalDevice] {
+        guard case .device(let device) = target else { return [] }
+        return externalDevices.filter {
+            $0.mountPoint != nil && !$0.isWholeDisk
+                && (device.isWholeDisk ? $0.wholeDiskIdentifier == device.identifier : $0.identifier == device.identifier)
+        }
+    }
+
+    @Published private(set) var isUnmounting = false
+    @Published var unmountError: String?
+
+    func unmountTarget() {
+        guard case .device(let device) = target, !isUnmounting, !isScanActive else { return }
+        isUnmounting = true
+        unmountError = nil
+        Task { [weak self] in
+            let failure = await Self.unmount(device)
+            let devices = await Self.listDevices()
+            guard let self else { return }
+            externalDevices = devices
+            unmountError = failure
+            isUnmounting = false
+        }
+    }
+
+    private nonisolated static func unmount(_ device: ExternalDevice) async -> String? {
+        DeviceDiscovery.unmount(device)
+    }
+
     func chooseDevice(_ device: ExternalDevice) {
         setTarget(.device(device))
     }
@@ -446,6 +571,10 @@ final class RecoveryViewModel: ObservableObject {
 
     private func setTarget(_ newTarget: ScanTarget) {
         target = newTarget
+        resumePoint = nil
+        progress = ScanProgress()
+        clearResultFilters()
+        unmountError = nil
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
@@ -495,18 +624,22 @@ final class RecoveryViewModel: ObservableObject {
         panel.nameFieldStringValue = "file-list-\(Self.fileStamp()).json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        let manifest = RecoveryManifest(
+        flushPendingItems()
+        var manifest = RecoveryManifest(
             items: items,
             volumeID: currentVolumeID,
             sourceName: items.first?.source.displayName ?? "",
             scanNote: scanNote,
             scanComplete: state == .finished
         )
+        manifest.resume = isScanActive ? liveResumePoint() : resumePoint
 
         do {
             try manifest.encoded().write(to: url, options: .atomic)
             manifestStatus = "Exported \(items.count) entries to \(url.lastPathComponent)."
-                + (manifest.scanComplete ? "" : " Scan was still running, so the list is partial.")
+                + (manifest.scanComplete ? "" : manifest.resume != nil
+                    ? " The scan had not finished; opening this session lets you resume it."
+                    : " The scan had not finished, so the list is partial.")
         } catch {
             manifestStatus = "Could not export: \(error.localizedDescription)"
         }
@@ -529,6 +662,8 @@ final class RecoveryViewModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         state = .scanning
+        progress = ScanProgress()
+        resumePoint = nil
         startScanClock(resetTotal: true)
         manifestStatus = "Verifying against the drive…"
 
@@ -580,6 +715,9 @@ final class RecoveryViewModel: ObservableObject {
         selectedItemID = nil
         tableSelection = []
         clearThumbnails()
+
+        // A resume offset only means something on the drive it came from.
+        resumePoint = verified.contains { $0.staleness == .volumeMismatch } ? nil : manifest.resume
 
         let stale = staleReasons.count
         let recoverable = items.count - stale
@@ -660,22 +798,30 @@ final class RecoveryViewModel: ObservableObject {
     }
 
     func startScan() {
-        guard let target else { return }
+        guard target != nil else { return }
         scanTask?.cancel()
+        scanStartFraction = 0
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil
         tableSelection = []
         clearPreview()
-        progress = ScanProgress()
         scanNote = nil
         clearThumbnails()
-        scanSummary = nil
         // Photos and videos are recognised by eye, not by a carved filename,
         // so those scans open in the gallery unless the user chose a view.
         if !userChoseViewMode {
             viewMode = selectedMediaPreset == .everything || selectedMediaPreset == .custom ? .list : .gallery
         }
+        runScan(resume: nil)
+    }
+
+    private func runScan(resume: ScanResume?) {
+        guard let target else { return }
+        scanTask?.cancel()
+        progress = ScanProgress()
+        scanSummary = nil
+        resumePoint = nil
         state = .scanning
         startScanClock(resetTotal: true)
 
@@ -683,6 +829,8 @@ final class RecoveryViewModel: ObservableObject {
         configured.fastScan = fastScan
         let scanner = configured
         let kinds = effectiveKinds
+        activeScanKinds = kinds
+        activeScanFast = fastScan
         let gate = PauseGate()
         pauseGate = gate
 
@@ -699,6 +847,7 @@ final class RecoveryViewModel: ObservableObject {
                 let found = try await scanner.scan(
                     plan: plan,
                     selectedKinds: kinds,
+                    resume: resume,
                     pauseGate: gate,
                     progress: { newProgress in
                         await MainActor.run { self?.progress = newProgress }
@@ -719,6 +868,8 @@ final class RecoveryViewModel: ObservableObject {
                     self.pauseGate = nil
                     self.stopScanClock()
                     self.scanSummary = Self.summarize(self.items, duration: self.elapsedScanTime)
+                    self.scanSummary?.unreadableBytes = Set(plan.regions.map(\.source))
+                        .reduce(0) { $0 + $1.unreadableBytes }
                     self.state = .finished
                     self.announceCompletion()
                 }
@@ -732,6 +883,10 @@ final class RecoveryViewModel: ObservableObject {
             } catch {
                 await MainActor.run {
                     self?.pauseGate = nil
+                    self?.flushPendingItems()
+                    // An unplugged or failing drive need not cost the part
+                    // already searched.
+                    self?.resumePoint = self?.liveResumePoint()
                     self?.stopScanClock()
                     self?.state = .failed(error.localizedDescription)
                     self?.announceCompletion()
@@ -745,6 +900,7 @@ final class RecoveryViewModel: ObservableObject {
         scanTask = nil
         pauseGate = nil
         flushPendingItems()
+        resumePoint = liveResumePoint()
         stopScanClock()
         state = .idle
     }

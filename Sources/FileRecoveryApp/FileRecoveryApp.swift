@@ -41,6 +41,8 @@ struct FileRecoveryApp: App {
                 Button(viewModel.state == .paused ? "Resume Scan" : "Pause Scan") { viewModel.togglePause() }
                     .keyboardShortcut("p", modifiers: [.command, .option])
                     .disabled(!viewModel.canPauseScan)
+                Button("Resume Stopped Scan") { viewModel.resumeScan() }
+                    .disabled(viewModel.resumePoint == nil || viewModel.isScanActive || viewModel.state == .recovering)
 
                 Divider()
 

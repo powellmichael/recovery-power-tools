@@ -1,10 +1,15 @@
 import CryptoKit
 import Foundation
+import ImageIO
 
 /// Tracks fingerprints seen so far in one scan. Reference type so the same set
 /// spans every region; used sequentially from the scan task only.
 private final class DuplicateTracker {
-    private var seen: Set<String> = []
+    private var seen: Set<String>
+
+    init(seen: Set<String> = []) {
+        self.seen = seen
+    }
 
     /// Returns true when this fingerprint was already recorded.
     func markSeen(_ fingerprint: String?) -> Bool {
@@ -84,10 +89,15 @@ struct RecoveryScanner: Sendable {
     func scan(
         plan: ScanPlan,
         selectedKinds: Set<MediaKind>,
+        resume requestedResume: ScanResume? = nil,
         pauseGate: PauseGate? = nil,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
         itemFound: @escaping @Sendable (RecoveredItem) async -> Void
     ) async throws -> [RecoveredItem] {
+        // A resume offset is a position in one source. A folder scan reads
+        // many files, where it means nothing, so that starts over instead.
+        let firstSource = plan.regions.first?.source
+        let resume = plan.regions.allSatisfy({ $0.source === firstSource }) ? requestedResume : nil
         let totalBytes = plan.regions.reduce(UInt64(0)) { $0 + UInt64($1.range.count) }
         var allItems: [RecoveredItem] = []
         var bytesScanned: UInt64 = 0
@@ -95,7 +105,7 @@ struct RecoveryScanner: Sendable {
         // Deleted directory entries are first-class results: verify the
         // signature at each entry's data offset and emit it with its original
         // name and exact size. Carving then only adds anonymous extras.
-        let tracker = DuplicateTracker()
+        let tracker = DuplicateTracker(seen: resume?.fingerprints ?? [])
         var claimed: [RecoveredItem] = []
         if let source = plan.regions.first?.source, !plan.deletedFiles.isEmpty {
             let freeRanges = plan.regions.map(\.range).sorted { $0.lowerBound < $1.lowerBound }
@@ -116,9 +126,15 @@ struct RecoveryScanner: Sendable {
                     originalFilename: entry.name,
                     segments: entry.segments
                 )
+                item.modifiedDate = entry.modified
                 item.fingerprint = fingerprint(for: item)
-                item.isDuplicate = tracker.markSeen(item.fingerprint)
                 claimed.append(item)
+                // The first run reported every directory entry before it
+                // began carving. On a resume they are rebuilt only so carving
+                // can still tell which space they occupy.
+                guard resume == nil else { continue }
+                item.isDuplicate = tracker.markSeen(item.fingerprint)
+                claimed[claimed.count - 1] = item
                 allItems.append(item)
                 await itemFound(item)
             }
@@ -126,6 +142,10 @@ struct RecoveryScanner: Sendable {
 
         for region in plan.regions {
             try Task.checkCancellation()
+            if let resume, region.range.upperBound <= resume.offset {
+                bytesScanned += UInt64(region.range.count)
+                continue
+            }
             let regionClaims = claimed.filter {
                 $0.byteOffset < region.range.upperBound && $0.byteOffset + $0.byteLength > region.range.lowerBound
             }
@@ -136,6 +156,7 @@ struct RecoveryScanner: Sendable {
                 selectedKinds: selectedKinds,
                 deletedFiles: plan.deletedFiles,
                 claimed: regionClaims,
+                resume: resume,
                 tracker: tracker,
                 pauseGate: pauseGate,
                 progress: progress,
@@ -156,6 +177,7 @@ struct RecoveryScanner: Sendable {
         selectedKinds: Set<MediaKind>,
         deletedFiles: [UInt64: DeletedFileEntry],
         claimed: [RecoveredItem],
+        resume: ScanResume? = nil,
         tracker: DuplicateTracker,
         pauseGate: PauseGate?,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
@@ -164,7 +186,7 @@ struct RecoveryScanner: Sendable {
         let source = region.source
         let regionEnd = region.range.upperBound
         var items: [RecoveredItem] = []
-        var cursor = region.range.lowerBound
+        var cursor = max(region.range.lowerBound, min(resume?.offset ?? 0, regionEnd))
         // Kept as bytes, not Data: the scan buffer used to be built as Data and
         // then converted to [UInt8] for every chunk, copying 4 MB twice per read.
         var carry: [UInt8] = []
@@ -174,7 +196,7 @@ struct RecoveryScanner: Sendable {
         // stopped. So "does this overlap anything already found?" is answered by
         // one comparison against the furthest end so far, instead of a scan over
         // every item found so far. That scan was O(n²) across a whole drive.
-        var furthestItemEnd = region.range.lowerBound
+        var furthestItemEnd = max(region.range.lowerBound, resume?.floor ?? 0)
 
         while cursor < regionEnd {
             try await waitIfPaused(pauseGate)
@@ -198,6 +220,12 @@ struct RecoveryScanner: Sendable {
             ) {
                 guard candidate.byteOffset >= furthestItemEnd,
                       !overlapsExisting(candidate, in: claimed) else { continue }
+                // Already held from before the stop: step over it, but still
+                // treat its bytes as taken.
+                if let resume, resume.knownOffsets.contains(candidate.byteOffset) {
+                    furthestItemEnd = max(furthestItemEnd, candidate.byteOffset + candidate.byteLength)
+                    continue
+                }
                 var candidate = candidate
                 candidate.fingerprint = fingerprint(for: candidate)
                 candidate.isDuplicate = tracker.markSeen(candidate.fingerprint)
@@ -216,7 +244,8 @@ struct RecoveryScanner: Sendable {
                 await progress(ScanProgress(
                     bytesScanned: scannedBefore + (cursor - region.range.lowerBound),
                     totalBytes: totalBytes,
-                    currentPath: source.displayName
+                    currentPath: source.displayName,
+                    position: cursor
                 ))
             }
         }
@@ -267,6 +296,7 @@ struct RecoveryScanner: Sendable {
         let start: Int
         let length: UInt64
         let ext: String?
+        var endGuessed = false
     }
 
     private func findCandidates(
@@ -309,14 +339,18 @@ struct RecoveryScanner: Sendable {
                 if let entry, entry.length > 0, byteOffset + entry.length <= regionEnd {
                     length = entry.length
                 }
-                results.append(item(
+                var found = item(
                     candidate.kind,
                     source: source,
                     byteOffset: byteOffset,
                     byteLength: length,
                     ext: candidate.ext,
                     directoryEntry: entry
-                ))
+                )
+                // A directory entry supplies the true size, so nothing is guessed.
+                found.endGuessed = candidate.endGuessed && entry == nil
+                found.modifiedDate = entry?.modified
+                results.append(found)
                 index = candidate.start + Int(min(length, UInt64(Int.max - candidate.start)))
             } else {
                 index += 1
@@ -399,7 +433,7 @@ struct RecoveryScanner: Sendable {
             // to the cap before giving up.
             if fastScan { return nil }
             guard let end = try findMarkerEnd(in: source, from: absolute + 3, limit: limit, marker: [0xFF, 0xD9]) else { return nil }
-            return Candidate(kind: .jpeg, start: index, length: end - absolute, ext: nil)
+            return Candidate(kind: .jpeg, start: index, length: end - absolute, ext: nil, endGuessed: true)
 
         case 0x89: // PNG
             guard kinds.contains(.png), match(bytes, index, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) else { return nil }
@@ -1035,9 +1069,57 @@ struct RecoveryScanner: Sendable {
 
     func recover(_ item: RecoveredItem, to destination: URL) throws -> URL {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let outputURL = uniqueOutputURL(for: item, in: destination)
+        let outputURL = uniqueOutputURL(named: item.displayName, in: destination)
         try write(item, to: outputURL)
-        return outputURL
+
+        // The drive's own record of when the file was last changed beats
+        // "today", which is all a freshly written copy would say.
+        if let modified = item.modifiedDate {
+            try? FileManager.default.setAttributes(
+                [.creationDate: modified, .modificationDate: modified], ofItemAtPath: outputURL.path
+            )
+        }
+
+        // A carved file has no name or date of its own. A photo's EXIF capture
+        // time supplies both, so it sorts by when it was taken instead of
+        // arriving as jpeg-1a2b3c.jpg dated today.
+        // ponytail: images only. Videos carry a creation date too (AVAsset);
+        // add that when carved videos need real names.
+        guard item.originalFilename == nil, let taken = Self.captureDate(at: outputURL) else { return outputURL }
+        try? FileManager.default.setAttributes(
+            [.creationDate: taken, .modificationDate: taken], ofItemAtPath: outputURL.path
+        )
+        let stamp = Self.filenameStamp.string(from: taken)
+        let named = uniqueOutputURL(named: "Photo \(stamp).\(item.fileExtension)", in: destination)
+        do {
+            try FileManager.default.moveItem(at: outputURL, to: named)
+            return named
+        } catch {
+            return outputURL
+        }
+    }
+
+    /// EXIF stores local wall-clock time with no zone; read it as local.
+    private static let exifDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter
+    }()
+
+    private static let filenameStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return formatter
+    }()
+
+    static func captureDate(at url: URL) -> Date? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
+              let raw = exif[kCGImagePropertyExifDateTimeOriginal] as? String else { return nil }
+        return exifDate.date(from: raw)
     }
 
     func write(_ item: RecoveredItem, to outputURL: URL) throws {
@@ -1066,12 +1148,13 @@ struct RecoveryScanner: Sendable {
         }
     }
 
-    private func uniqueOutputURL(for item: RecoveredItem, in destination: URL) -> URL {
-        var candidate = destination.appendingPathComponent(item.displayName)
+    private func uniqueOutputURL(named name: String, in destination: URL) -> URL {
+        var candidate = destination.appendingPathComponent(name)
         var counter = 2
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
         while FileManager.default.fileExists(atPath: candidate.path) {
-            let base = (item.displayName as NSString).deletingPathExtension
-            candidate = destination.appendingPathComponent("\(base)-\(counter).\(item.fileExtension)")
+            candidate = destination.appendingPathComponent(ext.isEmpty ? "\(base)-\(counter)" : "\(base)-\(counter).\(ext)")
             counter += 1
         }
         return candidate

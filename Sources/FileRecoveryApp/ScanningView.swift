@@ -46,7 +46,7 @@ struct ScanningView: View {
             }
             Button("Keep Scanning", role: .cancel) {}
         } message: {
-            Text("Files found so far will remain available, but the rest of the source will not be searched.")
+            Text("Files found so far stay available. You can resume the scan later from where it stopped, or save the session and resume another day.")
         }
     }
 

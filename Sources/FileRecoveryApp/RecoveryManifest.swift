@@ -22,6 +22,18 @@ struct RecoveryManifest: Codable {
     /// False when exported before the scan finished — the list is partial.
     var scanComplete: Bool
     var entries: [Entry]
+    /// Present when the scan was stopped part-way and can be continued.
+    /// Optional, so session files saved before it existed still open.
+    var resume: Resume?
+
+    struct Resume: Codable, Equatable, Sendable {
+        /// Absolute offset in the source; everything below it was searched.
+        var offset: UInt64
+        /// How far through the scan that was, 0 to 1, for display.
+        var fraction: Double
+        var kinds: [MediaKind]
+        var fastScan: Bool
+    }
 
     struct Entry: Codable {
         var offset: UInt64
@@ -33,6 +45,8 @@ struct RecoveryManifest: Codable {
         var segments: [Range<UInt64>]?
         var fingerprint: String?
         var isDuplicate: Bool
+        /// Optional, so session files saved before it existed still open.
+        var modified: Date?
 
         /// Whether the machine that wrote this manifest had already recovered
         /// the file. This is that machine's history, not a property of the
@@ -69,6 +83,7 @@ extension RecoveryManifest {
                 segments: item.segments,
                 fingerprint: item.fingerprint,
                 isDuplicate: item.isDuplicate,
+                modified: item.modifiedDate,
                 // A file recovered this session counts as recovered, as does one
                 // the local log already knew about.
                 recoveredOnExportingMachine: item.recoveredURL != nil || item.previouslyRecovered,
@@ -131,6 +146,7 @@ extension RecoveryScanner {
                 segments: entry.segments
             )
             item.isDuplicate = entry.isDuplicate
+            item.modifiedDate = entry.modified
             item.fingerprint = entry.fingerprint
             item.previouslyRecovered = entry.recoveredOnExportingMachine
 
