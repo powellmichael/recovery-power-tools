@@ -13,7 +13,8 @@ private struct PhysicalDriveGroup: Identifiable {
 /// the user has made the one decision that gives them context: what to scan.
 struct SourceSelectionView: View {
     @ObservedObject var viewModel: RecoveryViewModel
-    @Binding var appearanceRaw: String
+    /// Back to the tool picker.
+    let showHome: () -> Void
     @State private var showsAdvancedDevices = false
 
     private let columns = [
@@ -83,6 +84,12 @@ struct SourceSelectionView: View {
             }
         }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button(action: showHome) {
+                    Label("All Tools", systemImage: "chevron.backward")
+                }
+                .help("Back to the list of tools")
+            }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     viewModel.refreshDevices()
@@ -91,23 +98,6 @@ struct SourceSelectionView: View {
                 }
                 .disabled(viewModel.isRefreshingDevices)
                 .help("Look for newly connected drives")
-
-                Menu {
-                    ForEach(AppearancePreference.allCases) { preference in
-                        Button {
-                            appearanceRaw = preference.rawValue
-                        } label: {
-                            if preference.rawValue == appearanceRaw {
-                                Label(preference.label, systemImage: "checkmark")
-                            } else {
-                                Text(preference.label)
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: (AppearancePreference(rawValue: appearanceRaw) ?? .system).systemImage)
-                }
-                .help("Appearance")
             }
         }
         .onAppear {
@@ -194,6 +184,11 @@ struct SourceSelectionView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
             .help("Disk images can contain deleted files; folders contain existing files only")
+
+            Text("Your Mac's built-in drive is not listed. Its storage erases deleted data on its own, so there is rarely anything left to recover from it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -410,6 +405,20 @@ private struct CompatibilityBadge: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(tint.opacity(0.10), in: Capsule())
+            .help(explanation)
+    }
+
+    /// What the badge means in practice. "Limited" on its own told the user
+    /// nothing about what to expect.
+    private var explanation: String {
+        switch compatibility {
+        case .fullySupported:
+            "Only the drive's free space is scanned, so everything found is deleted data. Original filenames are recovered where the drive still holds them."
+        case .limited:
+            "The whole volume is scanned, so results can include files that still exist. Volumes in this format on solid-state drives often erase deleted data on their own, so less may be found."
+        case .unknown:
+            "This format isn't recognised. The whole volume is scanned, so results can include files that still exist."
+        }
     }
 }
 
@@ -510,7 +519,7 @@ private struct SourceSelectionViewPreviews: PreviewProvider {
                 physicalName: "Camera Card Reader"
             )
         ]
-        return SourceSelectionView(viewModel: viewModel, appearanceRaw: .constant("system"))
+        return SourceSelectionView(viewModel: viewModel, showHome: {})
             .frame(width: 1180, height: 760)
     }
 }

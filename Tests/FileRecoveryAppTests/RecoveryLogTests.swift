@@ -916,3 +916,75 @@ private func tempLogURL() -> URL {
         model.stopScanClock()
     }
 }
+
+/// App-shell logic added with the tool home screen and scan-setup step.
+@MainActor
+@Suite struct AppShellTests {
+    private func model() -> RecoveryViewModel {
+        RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+    }
+
+    private func items(_ count: Int) async throws -> [RecoveredItem] {
+        var blob: [UInt8] = []
+        for index in 0..<count {
+            blob += [UInt8](repeating: 0xAA, count: 32)
+            blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+            blob += [UInt8](repeating: UInt8(index &+ 1), count: 100)
+            blob += [0xFF, 0xD9]
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("appshell-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        return try await RecoveryScanner().scan(
+            plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in }
+        )
+    }
+
+    /// No estimate until there is a real run to extrapolate from: the first
+    /// seconds are the password prompt and filesystem parsing.
+    @Test func noEstimateTooEarly() {
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 10, fraction: 0.5) == nil)
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 600, fraction: 0.01) == nil)
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 600, fraction: 1) == nil)
+    }
+
+    @Test func estimateScalesFromAverageRate() {
+        // Half done in 46 minutes leaves about 46 minutes.
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 46 * 60, fraction: 0.5) == "About 46 min left")
+        // A quarter done in 1 hour leaves 3 hours.
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 3600, fraction: 0.25) == "About 3 hr left")
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 3600, fraction: 0.4) == "About 1 hr 30 min left")
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 600, fraction: 0.95) == "Less than a minute left")
+    }
+
+    /// A chip's number must equal the rows its filter shows, and must follow
+    /// the items as they change rather than serving a stale cached count.
+    @Test func chipCountsMatchTheirFilters() async throws {
+        let model = model()
+        let found = try await items(4)
+        try #require(found.count == 4)
+        model.items = found
+        model.setReviewMark(.skipped, ids: [found[0].id])
+        model.setReviewMark(.recoveredElsewhere, ids: [found[1].id])
+        model.setSelectedForRecovery(found[2], isSelected: true)
+
+        for visibility in RecoveredVisibility.allCases {
+            model.recoveredVisibility = visibility
+            #expect(model.count(for: visibility) == model.filteredItems.count, "\(visibility.rawValue)")
+        }
+
+        // Clearing a mark changes the items, so the cached counts must follow.
+        model.setReviewMark(nil, ids: [found[0].id])
+        #expect(model.count(for: .unrecovered) == 3)
+    }
+
+    /// An explicit list/gallery choice is a stated preference and survives.
+    @Test func explicitViewModeIsRemembered() {
+        let model = model()
+        #expect(model.viewMode == .list)
+        model.setViewMode(.gallery)
+        #expect(model.viewMode == .gallery)
+    }
+}
