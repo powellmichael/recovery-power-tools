@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 @testable import FileRecoveryApp
+import CryptoKit
+import LicenseKit
 
 private func tempLogURL() -> URL {
     FileManager.default.temporaryDirectory
@@ -1027,5 +1029,92 @@ private func tempLogURL() -> URL {
         model.clearResultFilters()
         #expect(!model.hasResultFilters)
         #expect(model.filteredItems.count == 4)
+    }
+}
+
+@Suite struct LicenseTests {
+    private let signingKey = Curve25519.Signing.PrivateKey()
+    private var publicKey: Data { signingKey.publicKey.rawRepresentation }
+
+    private func defaults() -> UserDefaults {
+        UserDefaults(suiteName: "license-test-\(UUID().uuidString)")!
+    }
+
+    @Test func issuedKeyVerifiesAndTamperedKeyDoesNot() throws {
+        let license = License(name: "Ada Lovelace", email: "ada@example.com", issued: Date(timeIntervalSince1970: 1_700_000_000))
+        let key = try LicenseCodec.issue(license, privateKey: signingKey)
+        #expect(key.hasPrefix("RPT1."))
+        #expect(LicenseCodec.verify(key, publicKey: publicKey) == license)
+        // Wrapped and indented, as it arrives when pasted from an email.
+        let wrapped = "  " + key.prefix(40) + "\n  " + key.dropFirst(40) + "\n"
+        #expect(LicenseCodec.verify(wrapped, publicKey: publicKey) == license)
+
+        // Someone else's key pair, an edited name, and plain junk all fail.
+        #expect(LicenseCodec.verify(key, publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation) == nil)
+        let forged = try JSONEncoder().encode(["name": "Mallory", "email": "m@example.com"])
+        let parts = key.split(separator: ".")
+        let swapped = "RPT1." + forged.base64EncodedString().replacingOccurrences(of: "=", with: "") + "." + parts[2]
+        #expect(LicenseCodec.verify(swapped, publicKey: publicKey) == nil)
+        #expect(LicenseCodec.verify("not a key", publicKey: publicKey) == nil)
+        #expect(LicenseCodec.verify("", publicKey: publicKey) == nil)
+    }
+
+    /// The one gate: an unlicensed copy scans freely but writes nothing.
+    @MainActor @Test func recoveryIsGatedUntilAValidKeyIsEntered() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 4096)
+        blob += [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10] + [UInt8](repeating: 0x11, count: 14)
+        blob += [0xFF, 0xDA, 0x00, 0x04, 0x01, 0x02] + [UInt8](repeating: 0x33, count: 500) + [0xFF, 0xD9]
+        blob += [UInt8](repeating: 0xAA, count: 4096)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("license-\(UUID().uuidString).bin")
+        try Data(blob).write(to: url)
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("license-out-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: out)
+        }
+
+        let store = defaults()
+        let model = RecoveryViewModel(
+            recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL(),
+            licensePublicKey: publicKey, licenseDefaults: store
+        )
+        #expect(!model.isRecoveryUnlocked)
+        model.target = .path(url)
+        model.selectMediaPreset(.photos)
+        model.startScan()
+        for _ in 0..<500 where model.state != .finished { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(model.items.count == 1) // scanning is free
+        model.selectAllForRecovery()
+
+        model.recoverSelected(to: out)
+        #expect(model.showLicensePrompt)
+        #expect(model.state == .finished)
+        #expect(!FileManager.default.fileExists(atPath: out.path))
+
+        #expect(!model.activateLicense("RPT1.bogus.bogus"))
+        #expect(model.showLicensePrompt)
+        let key = try LicenseCodec.issue(License(name: "Ada", email: "ada@example.com"), privateKey: signingKey)
+        #expect(model.activateLicense(key))
+        #expect(!model.showLicensePrompt)
+
+        model.recoverSelected(to: out)
+        for _ in 0..<500 where model.state == .recovering { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(model.items.first?.recoveredURL != nil)
+
+        // The key is remembered across launches, and removable.
+        let relaunched = RecoveryViewModel(
+            recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL(),
+            licensePublicKey: publicKey, licenseDefaults: store
+        )
+        #expect(relaunched.license?.name == "Ada")
+        relaunched.removeLicense()
+        #expect(!relaunched.isRecoveryUnlocked)
+        #expect(store.string(forKey: "licenseKey") == nil)
+    }
+
+    /// `swift run` builds carry no key, and must not lock the developer out.
+    @MainActor @Test func buildWithoutAKeyIsUnlocked() {
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL(), licensePublicKey: nil)
+        #expect(model.isRecoveryUnlocked)
     }
 }

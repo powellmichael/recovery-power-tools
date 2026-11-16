@@ -2,3 +2,4 @@
 .build/
 .claude/
 graphify-out/
+dist/

@@ -65,7 +65,7 @@ struct FileRecoveryApp: App {
         }
 
         Settings {
-            SettingsView()
+            SettingsView(viewModel: viewModel)
         }
     }
 }
@@ -73,6 +73,7 @@ struct FileRecoveryApp: App {
 /// App-wide preferences. Appearance lived in two separate toolbars before;
 /// a setting that changes rarely belongs here, not on every screen.
 struct SettingsView: View {
+    @ObservedObject var viewModel: RecoveryViewModel
     @AppStorage("appearance") private var appearanceRaw = AppearancePreference.system.rawValue
 
     var body: some View {
@@ -84,9 +85,11 @@ struct SettingsView: View {
                 }
             }
             .pickerStyle(.inline)
+
+            LicenseSettingsSection(viewModel: viewModel)
         }
-        .padding(24)
-        .frame(width: 360)
+        .formStyle(.grouped)
+        .frame(width: 420)
         .preferredColorScheme((AppearancePreference(rawValue: appearanceRaw) ?? .system).colorScheme)
     }
 }
