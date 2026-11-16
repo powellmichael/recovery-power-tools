@@ -324,6 +324,16 @@ Done:
   without its name. Checked against a real macOS-made FAT32 image, not a
   camera-formatted card or one deleted from in Windows.
 
+- **File dates from directory entries.** `DeletedFileEntry.modified` is
+  parsed on exFAT (with its UTC offset byte), FAT32 (local wall-clock time)
+  and NTFS (`$STANDARD_INFORMATION`), carried on `RecoveredItem.modifiedDate`,
+  saved in session files, and applied to the recovered file's created and
+  modified dates. Carved files with no entry still use EXIF, photos only.
+  FAT32 dates written by macOS can read back an hour out across a
+  daylight-saving change (seen in the FAT32 image test; macOS appears to
+  apply today's UTC offset when writing). The date is not shown in the
+  results list yet.
+
 Not done yet: timestamps from exFAT and NTFS directory entries,
 names for carved videos, scan resume. The results list still shows
 "Not Available" for carved files until they are recovered. None of this has

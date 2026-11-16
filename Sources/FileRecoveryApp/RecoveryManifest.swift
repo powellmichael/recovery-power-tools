@@ -33,6 +33,8 @@ struct RecoveryManifest: Codable {
         var segments: [Range<UInt64>]?
         var fingerprint: String?
         var isDuplicate: Bool
+        /// Optional, so session files saved before it existed still open.
+        var modified: Date?
 
         /// Whether the machine that wrote this manifest had already recovered
         /// the file. This is that machine's history, not a property of the
@@ -69,6 +71,7 @@ extension RecoveryManifest {
                 segments: item.segments,
                 fingerprint: item.fingerprint,
                 isDuplicate: item.isDuplicate,
+                modified: item.modifiedDate,
                 // A file recovered this session counts as recovered, as does one
                 // the local log already knew about.
                 recoveredOnExportingMachine: item.recoveredURL != nil || item.previouslyRecovered,
@@ -131,6 +134,7 @@ extension RecoveryScanner {
                 segments: entry.segments
             )
             item.isDuplicate = entry.isDuplicate
+            item.modifiedDate = entry.modified
             item.fingerprint = entry.fingerprint
             item.previouslyRecovered = entry.recoveredOnExportingMachine
 

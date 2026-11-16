@@ -348,6 +348,8 @@ struct RecoveredItem: Identifiable, Hashable, Sendable {
     /// True when the file's end was guessed from an end marker because its
     /// structure did not parse (Deep scan's fallback for damaged JPEGs).
     var endGuessed = false
+    /// When the file was last modified, from its deleted directory entry.
+    var modifiedDate: Date?
 
     /// Shown as "May be damaged". Unreadable blocks are looked up live, since
     /// most of a large file is first read at recovery time, not during the scan.

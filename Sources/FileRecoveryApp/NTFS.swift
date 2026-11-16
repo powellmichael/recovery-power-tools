@@ -140,6 +140,27 @@ enum NTFS {
         return best?.name
     }
 
+    /// Last-modified time from $STANDARD_INFORMATION (0x10): a count of
+    /// 100 ns ticks since 1601, in UTC.
+    static func modifiedDate(in record: [UInt8]) -> Date? {
+        var offset = Int(FreeSpaceMap.le16(record, 20))
+        while offset + 16 <= record.count {
+            let type = FreeSpaceMap.le32(record, offset)
+            if type == 0xFFFF_FFFF { break }
+            let length = Int(FreeSpaceMap.le32(record, offset + 4))
+            guard length >= 24, offset + length <= record.count else { break }
+            defer { offset += length }
+            guard type == 0x10, record[offset + 8] == 0 else { continue }
+            let contentOffset = offset + Int(FreeSpaceMap.le16(record, offset + 20))
+            guard contentOffset + 16 <= record.count else { return nil }
+            let ticks = FreeSpaceMap.le64(record, contentOffset + 8)
+            let seconds = Double(ticks) / 10_000_000 - 11_644_473_600
+            // Before 1980 means an empty or damaged field, not a real file.
+            return seconds > 315_532_800 ? Date(timeIntervalSince1970: seconds) : nil
+        }
+        return nil
+    }
+
     /// Decodes an NTFS run list: [header][length bytes][signed LCN delta bytes]…
     /// ponytail: stops at sparse runs (holes); fine for media recovery.
     static func decodeRuns(_ bytes: [UInt8], from start: Int, to end: Int) -> [(start: UInt64, clusters: UInt64)] {
@@ -284,7 +305,8 @@ enum NTFS {
                     results[firstSegment.lowerBound] = DeletedFileEntry(
                         name: name,
                         length: data.size,
-                        segments: segments.count > 1 ? segments : nil
+                        segments: segments.count > 1 ? segments : nil,
+                        modified: modifiedDate(in: rec)
                     )
                 }
                 offset += UInt64(chunk.count)

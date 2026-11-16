@@ -117,6 +117,7 @@ struct RecoveryScanner: Sendable {
                     originalFilename: entry.name,
                     segments: entry.segments
                 )
+                item.modifiedDate = entry.modified
                 item.fingerprint = fingerprint(for: item)
                 item.isDuplicate = tracker.markSeen(item.fingerprint)
                 claimed.append(item)
@@ -321,6 +322,7 @@ struct RecoveryScanner: Sendable {
                 )
                 // A directory entry supplies the true size, so nothing is guessed.
                 found.endGuessed = candidate.endGuessed && entry == nil
+                found.modifiedDate = entry?.modified
                 results.append(found)
                 index = candidate.start + Int(min(length, UInt64(Int.max - candidate.start)))
             } else {
@@ -1042,6 +1044,14 @@ struct RecoveryScanner: Sendable {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         let outputURL = uniqueOutputURL(named: item.displayName, in: destination)
         try write(item, to: outputURL)
+
+        // The drive's own record of when the file was last changed beats
+        // "today", which is all a freshly written copy would say.
+        if let modified = item.modifiedDate {
+            try? FileManager.default.setAttributes(
+                [.creationDate: modified, .modificationDate: modified], ofItemAtPath: outputURL.path
+            )
+        }
 
         // A carved file has no name or date of its own. A photo's EXIF capture
         // time supplies both, so it sorts by when it was taken instead of

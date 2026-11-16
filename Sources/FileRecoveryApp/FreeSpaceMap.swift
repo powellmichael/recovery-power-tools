@@ -8,6 +8,8 @@ struct DeletedFileEntry: Sendable, Equatable {
     /// Disk byte ranges holding the data when the file was fragmented
     /// (NTFS data runs); nil means a single contiguous range at the key offset.
     var segments: [Range<UInt64>]? = nil
+    /// Last-modified time from the directory entry, when it holds a valid one.
+    var modified: Date? = nil
 }
 
 /// Free (unallocated) byte regions of a volume. Anything carved from these
@@ -213,7 +215,9 @@ struct FreeSpaceMap: Sendable {
                 let longName = String(utf16CodeUnits: units, count: units.count)
                 let name = longName.isEmpty ? shortName(dir, at: i, deleted: true) : longName
                 guard !name.isEmpty else { continue }
-                results[clusterAddress(cluster)] = DeletedFileEntry(name: name, length: length)
+                // FAT stores local wall-clock time with no zone.
+                let modified = dosDate(date: le16(dir, i + 24), time: le16(dir, i + 22), utcOffsetMinutes: nil)
+                results[clusterAddress(cluster)] = DeletedFileEntry(name: name, length: length, modified: modified)
             }
         }
         return results
@@ -379,7 +383,13 @@ struct FreeSpaceMap: Sendable {
 
                 if isValidCluster(firstCluster) {
                     if isDeleted, !isDirectory, dataLength > 0, !name.isEmpty {
-                        results[clusterAddress(firstCluster)] = DeletedFileEntry(name: name, length: dataLength)
+                        // Byte 23 is the modified time's UTC offset in
+                        // quarter hours, valid only when its top bit is set.
+                        let zone = dir[i + 23]
+                        let offsetMinutes = zone & 0x80 != 0 ? Int(Int8(bitPattern: zone << 1) >> 1) * 15 : nil
+                        let stamp = le32(dir, i + 12)
+                        let modified = dosDate(date: stamp >> 16, time: stamp & 0xFFFF, utcOffsetMinutes: offsetMinutes)
+                        results[clusterAddress(firstCluster)] = DeletedFileEntry(name: name, length: dataLength, modified: modified)
                     } else if isDirectory {
                         // Live subdirectories, and deleted ones — their entry
                         // data often survives in free space.
@@ -414,6 +424,26 @@ struct FreeSpaceMap: Sendable {
         }
         closeRun(endingBefore: freeClusters.count)
         return regions
+    }
+
+    /// Decodes the packed date and time FAT and exFAT share. Nil for a zeroed
+    /// or impossible stamp. With no UTC offset the time is read as local,
+    /// which is how cameras and older systems write it.
+    static func dosDate(date: UInt32, time: UInt32, utcOffsetMinutes: Int?) -> Date? {
+        var parts = DateComponents()
+        parts.year = 1980 + Int(date >> 9 & 0x7F)
+        parts.month = Int(date >> 5 & 0x0F)
+        parts.day = Int(date & 0x1F)
+        parts.hour = Int(time >> 11 & 0x1F)
+        parts.minute = Int(time >> 5 & 0x3F)
+        parts.second = Int(time & 0x1F) * 2
+        guard (1...12).contains(parts.month!), (1...31).contains(parts.day!),
+              parts.hour! < 24, parts.minute! < 60, parts.second! < 60 else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        if let utcOffsetMinutes, let zone = TimeZone(secondsFromGMT: utcOffsetMinutes * 60) {
+            calendar.timeZone = zone
+        }
+        return calendar.date(from: parts)
     }
 
     private static func matchASCII(_ bytes: [UInt8], at index: Int, _ text: String) -> Bool {
