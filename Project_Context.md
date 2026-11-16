@@ -395,6 +395,31 @@ picked up if present), the store (Paddle or Lemon Squeezy) and automatic key
 delivery, Sparkle updates, EULA and privacy policy. The bundle identifier
 `com.recoverypowertools.app` is a placeholder.
 
+## Find Duplicates (phase 11, branch `phase-11-find-duplicates`)
+
+- **`DuplicateFinder`** finds exact duplicates in three passes: group by
+  size, then SHA-256 of the first 4 KB, then SHA-256 of the whole file. Only
+  the full hash decides. Skips hidden files, package contents (apps, the
+  Photos library), symlinks, empty files, and second names for the same file
+  (hard links, overlapping folders) by device and inode.
+- **`DuplicatesViewModel`** holds folders, progress, groups and the set
+  marked for the Trash. `setMarked` refuses the last unmarked copy in a
+  group. `moveMarkedToTrash` re-checks each group first: a file is moved only
+  while an unmarked copy still exists unchanged, and a file whose size or
+  date changed since the search is left alone. Uses `FileManager.trashItem`;
+  nothing is deleted outright. The check reads through
+  `FileManager.attributesOfItem`, because a `URL` caches the resource values
+  it was enumerated with and reported edited or deleted files as unchanged.
+- **`DuplicatesView`**: setup (folders, minimum size), progress, grouped
+  results with Quick Look and Show in Finder, a Mark menu (keep oldest or
+  newest), and a Move to Trash bar with a confirmation.
+- The Home card is live; `AppRoute.duplicates`. Not gated by the licence.
+
+Not done or not checked: moving to the real Trash (tests inject a delete),
+the screens in the running app beyond offscreen renders, speed on a large
+folder (hashing is single-threaded), similar-but-not-identical photos, and
+a keep-by-folder rule.
+
 ## Open UI Issues
 
 None currently open.
