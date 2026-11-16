@@ -17,6 +17,7 @@ final class RecoveryViewModel: ObservableObject {
         didSet {
             filteredCache = nil
             visibilityCountsCache = nil
+            presentKindsCache = nil
         }
     }
     @Published var progress = ScanProgress()
@@ -73,6 +74,34 @@ final class RecoveryViewModel: ObservableObject {
     /// Cleared by the didSet on every input below. Nil means "recompute".
     private var filteredCache: [RecoveredItem]?
 
+    // Result filters beyond the search box. Kept when a scan is repeated and
+    // cleared when another source is chosen.
+    @Published var kindFilter: MediaKind? { didSet { filteredCache = nil } }
+    /// In bytes; 0 means any size.
+    @Published var minimumSize: UInt64 = 0 { didSet { filteredCache = nil } }
+    @Published var requiresOriginalName = false { didSet { filteredCache = nil } }
+
+    var hasResultFilters: Bool {
+        kindFilter != nil || minimumSize > 0 || requiresOriginalName
+    }
+
+    func clearResultFilters() {
+        kindFilter = nil
+        minimumSize = 0
+        requiresOriginalName = false
+    }
+
+    /// File types present in the results, for the filter menu. Cached: the
+    /// toolbar re-renders often and this is a pass over every result.
+    private var presentKindsCache: [MediaKind]?
+    var presentKinds: [MediaKind] {
+        if let presentKindsCache { return presentKindsCache }
+        let present = Set(items.map(\.kind))
+        let ordered = MediaKind.allCases.filter(present.contains)
+        presentKindsCache = ordered
+        return ordered
+    }
+
     /// SwiftUI reads this several times per render pass, and so do the arrow
     /// keys, shift-click and Select All. Recomputing meant re-filtering and
     /// re-sorting the whole result set each time, so the cached value is what
@@ -102,6 +131,13 @@ final class RecoveryViewModel: ObservableObject {
             // file is recovered, just not by this tool.
             visible = visible.filter {
                 $0.previouslyRecovered || $0.recoveredURL != nil || $0.reviewMark == .recoveredElsewhere
+            }
+        }
+        if hasResultFilters {
+            let kind = kindFilter, minimum = minimumSize, named = requiresOriginalName
+            visible = visible.filter {
+                (kind == nil || $0.kind == kind) && $0.byteLength >= minimum
+                    && (!named || $0.originalFilename != nil)
             }
         }
         if !filenameFilter.isEmpty {
@@ -418,6 +454,40 @@ final class RecoveryViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Unmounting
+
+    /// Mounted volumes on the chosen drive. A mounted volume can still be
+    /// written to by macOS (Spotlight, Trash, access times), and every write
+    /// may land on the deleted data the scan is looking for.
+    var mountedTargetVolumes: [ExternalDevice] {
+        guard case .device(let device) = target else { return [] }
+        return externalDevices.filter {
+            $0.mountPoint != nil && !$0.isWholeDisk
+                && (device.isWholeDisk ? $0.wholeDiskIdentifier == device.identifier : $0.identifier == device.identifier)
+        }
+    }
+
+    @Published private(set) var isUnmounting = false
+    @Published var unmountError: String?
+
+    func unmountTarget() {
+        guard case .device(let device) = target, !isUnmounting, !isScanActive else { return }
+        isUnmounting = true
+        unmountError = nil
+        Task { [weak self] in
+            let failure = await Self.unmount(device)
+            let devices = await Self.listDevices()
+            guard let self else { return }
+            externalDevices = devices
+            unmountError = failure
+            isUnmounting = false
+        }
+    }
+
+    private nonisolated static func unmount(_ device: ExternalDevice) async -> String? {
+        DeviceDiscovery.unmount(device)
+    }
+
     func chooseDevice(_ device: ExternalDevice) {
         setTarget(.device(device))
     }
@@ -448,6 +518,8 @@ final class RecoveryViewModel: ObservableObject {
 
     private func setTarget(_ newTarget: ScanTarget) {
         target = newTarget
+        clearResultFilters()
+        unmountError = nil
         items = []
         selectedRecoveryIDs = []
         selectedItemID = nil

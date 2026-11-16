@@ -22,6 +22,7 @@ struct ScanSetupView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     header
                     notices
+                    unmountOffer
 
                     SetupCard(title: "What to look for") {
                         MediaPresetSelector(viewModel: viewModel)
@@ -108,6 +109,49 @@ struct ScanSetupView: View {
         }
         if let status = viewModel.manifestStatus {
             NoticeBand(text: status, systemImage: "doc.text", tint: .blue)
+        }
+    }
+
+    /// Offered, not required: the scan works either way, but an unmounted
+    /// drive cannot be written to while it is being searched.
+    @ViewBuilder private var unmountOffer: some View {
+        let mounted = viewModel.mountedTargetVolumes
+        if !mounted.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Label {
+                    Text("This drive is in use by macOS, which can write to it during the scan and overwrite deleted files. Unmounting it first prevents that. It will disappear from Finder until you unplug and reconnect it; the scan and recovery still work.")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "externaldrive.badge.exclamationmark")
+                }
+                .font(.callout)
+
+                HStack(spacing: 10) {
+                    Button(mounted.count == 1 ? "Unmount Before Scanning" : "Unmount \(mounted.count) Volumes Before Scanning") {
+                        viewModel.unmountTarget()
+                    }
+                    .disabled(viewModel.isUnmounting)
+                    if viewModel.isUnmounting {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+
+                if let error = viewModel.unmountError {
+                    Text("Could not unmount: \(error) Close any files or apps using the drive and try again, or scan it as it is.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            .foregroundStyle(.orange)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+        } else if case .device = viewModel.target, viewModel.unmountError == nil, !viewModel.externalDevices.isEmpty {
+            Label("This drive is not mounted, so nothing can write to it during the scan.", systemImage: "checkmark.shield")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 

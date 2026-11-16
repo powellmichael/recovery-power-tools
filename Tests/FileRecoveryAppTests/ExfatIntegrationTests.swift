@@ -50,4 +50,33 @@ import Testing
         #expect(recovered.originalFilename == "vacation.jpg")
         #expect(recovered.byteLength == UInt64(jpeg.count))
     }
+
+    /// Unmounts a throwaway disk image and checks the volume is gone while
+    /// the device stays attached, which is what a scan needs.
+    @Test func unmountLeavesDeviceAttached() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("unmount-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        let imageURL = workDir.appendingPathComponent("volume.dmg")
+
+        _ = try run("/usr/bin/hdiutil", ["create", "-size", "16m", "-fs", "ExFAT", "-volname", "FRUNMOUNT", "-layout", "NONE", imageURL.path])
+        let attachOutput = try run("/usr/bin/hdiutil", ["attach", "-nobrowse", imageURL.path])
+        let line = try #require(attachOutput.split(separator: "\n").first { $0.contains("/Volumes/") })
+        let devicePath = try #require(line.split(whereSeparator: \.isWhitespace).first.map(String.init))
+        let mountPoint = String(line[line.range(of: "/Volumes/")!.lowerBound...]).trimmingCharacters(in: .whitespaces)
+        defer { _ = try? run("/usr/bin/hdiutil", ["detach", devicePath]) }
+
+        let identifier = String(devicePath.dropFirst("/dev/".count))
+        #expect(DeviceDiscovery.bsdName(forPath: mountPoint) == identifier)
+
+        let device = ExternalDevice(identifier: identifier, volumeName: "FRUNMOUNT", size: 16 << 20, isWholeDisk: false)
+        #expect(DeviceDiscovery.unmount(device) == nil)
+        #expect(DeviceDiscovery.bsdName(forPath: mountPoint) != identifier)
+        #expect(FileManager.default.fileExists(atPath: devicePath))
+
+        // An unknown device reports diskutil's message instead of succeeding.
+        let missing = ExternalDevice(identifier: "disk9999s9", volumeName: nil, size: 0, isWholeDisk: false)
+        #expect(DeviceDiscovery.unmount(missing) != nil)
+    }
 }

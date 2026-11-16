@@ -303,8 +303,18 @@ Done:
   EXIF capture time after writing, renames to `Photo yyyy-MM-dd HH.mm.ss.ext`
   and sets the file's dates. Images only; files with an original name keep it.
 
-Not done yet: offer to unmount before scanning, size and "has original name"
-filters, FAT32 filenames, timestamps from exFAT and NTFS directory entries,
+- **Unmount offer.** The setup step shows an orange card when the chosen
+  drive has mounted volumes (`mountedTargetVolumes`), with a button that runs
+  `diskutil unmount` (or `unmountDisk` for a whole disk) through
+  `DeviceDiscovery.unmount`. Never forced; diskutil's refusal is shown.
+  Optional: a mounted drive can still be scanned.
+- **Result filters.** A Filter menu in the results toolbar: type, minimum
+  size, and "only files with their original name" (`kindFilter`,
+  `minimumSize`, `requiresOriginalName`). Applied in the cached
+  `filteredItems`, so Select All Shown respects them. Cleared when another
+  source is chosen, kept across a rescan. Chip counts ignore them.
+
+Not done yet: FAT32 filenames, timestamps from exFAT and NTFS directory entries,
 names for carved videos, scan resume. The results list still shows
 "Not Available" for carved files until they are recovered. None of this has
 been tried on a drive with real bad sectors.

@@ -137,6 +137,12 @@ struct ResultsView: View {
                 // Results exist but the current view shows none — say why,
                 // because an unexplained empty list reads as lost data.
                 EmptyFilterExplanation(visibility: viewModel.recoveredVisibility)
+                    .overlay(alignment: .bottom) {
+                        if viewModel.hasResultFilters {
+                            Button("Clear Filters") { viewModel.clearResultFilters() }
+                                .padding(.bottom, 40)
+                        }
+                    }
             } else {
                 HSplitView {
                     Group {
@@ -220,6 +226,8 @@ struct ResultsView: View {
                     .frame(width: 86)
                     .labelsHidden()
                     .help("Switch between list and gallery")
+
+                    filterMenu
 
                     Menu {
                         Button("Select All Shown") { viewModel.selectAllForRecovery() }
@@ -413,10 +421,53 @@ struct ResultsView: View {
         }
     }
 
+    private static let sizeChoices: [(label: String, bytes: UInt64)] = [
+        ("Any size", 0), ("100 KB or larger", 100_000), ("1 MB or larger", 1_000_000),
+        ("10 MB or larger", 10_000_000), ("100 MB or larger", 100_000_000),
+    ]
+
+    private var filterMenu: some View {
+        Menu {
+            Picker("Type", selection: Binding(
+                get: { viewModel.kindFilter },
+                set: { viewModel.kindFilter = $0 }
+            )) {
+                Text("All types").tag(MediaKind?.none)
+                ForEach(viewModel.presentKinds) { kind in
+                    Text(kind.rawValue).tag(MediaKind?.some(kind))
+                }
+            }
+            Picker("Size", selection: Binding(
+                get: { viewModel.minimumSize },
+                set: { viewModel.minimumSize = $0 }
+            )) {
+                ForEach(Self.sizeChoices, id: \.bytes) { choice in
+                    Text(choice.label).tag(choice.bytes)
+                }
+            }
+            Toggle("Only Files With Their Original Name", isOn: Binding(
+                get: { viewModel.requiresOriginalName },
+                set: { viewModel.requiresOriginalName = $0 }
+            ))
+            Divider()
+            Button("Clear Filters") { viewModel.clearResultFilters() }
+                .disabled(!viewModel.hasResultFilters)
+        } label: {
+            Label(
+                "Filter",
+                systemImage: viewModel.hasResultFilters
+                    ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle"
+            )
+        }
+        .help(viewModel.hasResultFilters
+              ? "Filters are hiding some results"
+              : "Show only some types, larger files, or files with their original name")
+    }
+
     private var filteredDetail: String? {
         let visible = viewModel.filteredItems.count
         guard visible != viewModel.items.count else { return nil }
-        return "\(visible) shown"
+        return "\(visible.formatted()) shown"
     }
 }
 
@@ -869,7 +920,7 @@ struct EmptyFilterExplanation: View {
         switch visibility {
         case .all:
             ("line.3.horizontal.decrease.circle", "No results match",
-             "The filename filter hides every result.")
+             "The search or the filters hide every result.")
         case .unrecovered:
             ("checkmark.circle", "Nothing new here",
              "Every result is recovered, skipped, or marked as recovered elsewhere.")

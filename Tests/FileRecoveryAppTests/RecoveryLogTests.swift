@@ -988,3 +988,44 @@ private func tempLogURL() -> URL {
         #expect(model.viewMode == .gallery)
     }
 }
+
+@Suite struct ResultFilterTests {
+    private func item(_ kind: MediaKind, length: UInt64, name: String?, source: ScanSource) -> RecoveredItem {
+        RecoveredItem(kind: kind, source: source, byteOffset: 0, byteLength: length,
+                      fileExtension: kind.fileExtension, originalFilename: name)
+    }
+
+    @MainActor @Test func filtersCombineAndClear() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("filter-\(UUID().uuidString).bin")
+        try Data(count: 16).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try ScanSource(fileURL: url)
+
+        let model = RecoveryViewModel(recoveryLogURL: tempLogURL(), reviewLogURL: tempLogURL())
+        model.items = [
+            item(.jpeg, length: 50_000, name: nil, source: source),
+            item(.jpeg, length: 2_000_000, name: "IMG_1.JPG", source: source),
+            item(.video, length: 90_000_000, name: nil, source: source),
+            item(.video, length: 500_000, name: "clip.mp4", source: source),
+        ]
+        #expect(model.presentKinds == [.jpeg, .video])
+        #expect(model.filteredItems.count == 4)
+
+        model.minimumSize = 1_000_000
+        #expect(model.filteredItems.map(\.byteLength) == [2_000_000, 90_000_000])
+        model.kindFilter = .jpeg
+        #expect(model.filteredItems.map(\.originalFilename) == ["IMG_1.JPG"])
+        model.kindFilter = nil
+        model.minimumSize = 0
+        model.requiresOriginalName = true
+        #expect(model.filteredItems.count == 2)
+
+        // Select All acts on what is shown, so a filter narrows it too.
+        model.selectAllForRecovery()
+        #expect(model.selectedRecoveryIDs.count == 2)
+
+        model.clearResultFilters()
+        #expect(!model.hasResultFilters)
+        #expect(model.filteredItems.count == 4)
+    }
+}
