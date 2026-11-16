@@ -283,6 +283,32 @@ Still to come from the plan: recovery hardening (bad sectors, unmount,
 integrity badge, friendly names and dates), packaging and licensing, then the
 two new tools.
 
+## Recovery Hardening (phase 9, branch `phase-9-recovery-hardening`, in progress)
+
+Done:
+
+- **Bad sectors.** `ScanSource.read` no longer throws on `EIO`. It re-reads
+  the range in 64 KB pieces, then block by block, zero-fills what stays
+  unreadable and records the block in `badBlocks`. Blocks sit on a fixed grid
+  of absolute offsets so re-reads never count a sector twice. A piece whose
+  first and last blocks both fail is written off whole (a failing read can
+  take seconds). Any other errno, such as an unplugged drive, still ends the
+  scan. `simulatedBadRanges` is the test hook.
+- **Summary bar** reports `ScanSummary.unreadableBytes`.
+- **"May be damaged" badge.** `RecoveredItem.mayBeDamaged` is true when Deep
+  scan guessed a JPEG's end (`endGuessed`) or the item touches an unreadable
+  block. Looked up live, because most of a large file is first read at
+  recovery time. Not saved in a session file.
+- **Names and dates for carved photos.** `RecoveryScanner.recover` reads the
+  EXIF capture time after writing, renames to `Photo yyyy-MM-dd HH.mm.ss.ext`
+  and sets the file's dates. Images only; files with an original name keep it.
+
+Not done yet: offer to unmount before scanning, size and "has original name"
+filters, FAT32 filenames, timestamps from exFAT and NTFS directory entries,
+names for carved videos, scan resume. The results list still shows
+"Not Available" for carved files until they are recovered. None of this has
+been tried on a drive with real bad sectors.
+
 ## Open UI Issues
 
 None currently open.

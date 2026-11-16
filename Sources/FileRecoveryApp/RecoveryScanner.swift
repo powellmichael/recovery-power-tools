@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import ImageIO
 
 /// Tracks fingerprints seen so far in one scan. Reference type so the same set
 /// spans every region; used sequentially from the scan task only.
@@ -1039,9 +1040,49 @@ struct RecoveryScanner: Sendable {
 
     func recover(_ item: RecoveredItem, to destination: URL) throws -> URL {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let outputURL = uniqueOutputURL(for: item, in: destination)
+        let outputURL = uniqueOutputURL(named: item.displayName, in: destination)
         try write(item, to: outputURL)
-        return outputURL
+
+        // A carved file has no name or date of its own. A photo's EXIF capture
+        // time supplies both, so it sorts by when it was taken instead of
+        // arriving as jpeg-1a2b3c.jpg dated today.
+        // ponytail: images only. Videos carry a creation date too (AVAsset);
+        // add that when carved videos need real names.
+        guard item.originalFilename == nil, let taken = Self.captureDate(at: outputURL) else { return outputURL }
+        try? FileManager.default.setAttributes(
+            [.creationDate: taken, .modificationDate: taken], ofItemAtPath: outputURL.path
+        )
+        let stamp = Self.filenameStamp.string(from: taken)
+        let named = uniqueOutputURL(named: "Photo \(stamp).\(item.fileExtension)", in: destination)
+        do {
+            try FileManager.default.moveItem(at: outputURL, to: named)
+            return named
+        } catch {
+            return outputURL
+        }
+    }
+
+    /// EXIF stores local wall-clock time with no zone; read it as local.
+    private static let exifDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter
+    }()
+
+    private static let filenameStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return formatter
+    }()
+
+    static func captureDate(at url: URL) -> Date? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
+              let raw = exif[kCGImagePropertyExifDateTimeOriginal] as? String else { return nil }
+        return exifDate.date(from: raw)
     }
 
     func write(_ item: RecoveredItem, to outputURL: URL) throws {
@@ -1070,12 +1111,13 @@ struct RecoveryScanner: Sendable {
         }
     }
 
-    private func uniqueOutputURL(for item: RecoveredItem, in destination: URL) -> URL {
-        var candidate = destination.appendingPathComponent(item.displayName)
+    private func uniqueOutputURL(named name: String, in destination: URL) -> URL {
+        var candidate = destination.appendingPathComponent(name)
         var counter = 2
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
         while FileManager.default.fileExists(atPath: candidate.path) {
-            let base = (item.displayName as NSString).deletingPathExtension
-            candidate = destination.appendingPathComponent("\(base)-\(counter).\(item.fileExtension)")
+            candidate = destination.appendingPathComponent(ext.isEmpty ? "\(base)-\(counter)" : "\(base)-\(counter).\(ext)")
             counter += 1
         }
         return candidate
