@@ -283,7 +283,7 @@ Still to come from the plan: recovery hardening (bad sectors, unmount,
 integrity badge, friendly names and dates), packaging and licensing, then the
 two new tools.
 
-## Recovery Hardening (phase 9, branch `phase-9-recovery-hardening`, in progress)
+## Recovery Hardening (phase 9, branch `phase-9-recovery-hardening`)
 
 Done:
 
@@ -334,10 +334,26 @@ Done:
   apply today's UTC offset when writing). The date is not shown in the
   results list yet.
 
-Not done yet: timestamps from exFAT and NTFS directory entries,
-names for carved videos, scan resume. The results list still shows
-"Not Available" for carved files until they are recovered. None of this has
-been tried on a drive with real bad sectors.
+- **Scan resume.** A scan that is stopped, or fails part-way (drive
+  unplugged), leaves `RecoveryViewModel.resumePoint`: the last reported
+  absolute offset rewound 1 MB, the fraction done, and the file types and
+  depth in use. Save Session writes it as the optional `resume` field;
+  Open Session restores it unless the volume differs. Resume Scan (results
+  and setup screens, Recovery menu) calls `resumeScan()`, which keeps the
+  results and passes a `ScanResume` to the scanner: regions below the offset
+  are skipped, results already held are stepped over (`knownOffsets`),
+  candidates inside a held file are ignored (`floor`), and duplicate
+  detection is seeded with held fingerprints. The offset is absolute, so it
+  survives the free-space map changing between sessions. Folder scans (many
+  sources) start over instead. Resuming asks for the password again, and the
+  "finished in" time covers only the resumed part.
+
+Phase 9 is complete as planned. Still open from it: the results list shows
+"Not Available" for carved files until they are recovered, carved videos get
+no real name or date, the modified date has no column, and none of the
+bad-sector handling has met a drive with real bad sectors. Scan resume is
+tested on files and through the view model, not on a real device across an
+app restart.
 
 ## Open UI Issues
 
@@ -481,8 +497,7 @@ to SD/removable devices, which `diskutil` reports via `BusProtocol`.
    landing, dedicated scanning state, filter toolbar, and persistent recovery
    bar remain clear and responsive with a real recovery queue.
 5. ~~FAT32 deleted directory entries~~ — done in phase 9.
-6. **Scan resume** via a cursor in the manifest, if field testing shows
-   manifests survive real-world use.
+6. ~~Scan resume~~ — done in phase 9.
 7. App icon, signing, Xcode project — only when distribution matters.
 
 ## Measured Performance

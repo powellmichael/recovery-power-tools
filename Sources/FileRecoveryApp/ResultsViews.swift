@@ -131,6 +131,12 @@ struct ResultsView: View {
                 ScanSummaryBar(viewModel: viewModel, summary: summary)
             }
 
+            if viewModel.resumePoint != nil, !viewModel.isScanActive {
+                ResumeScanBand(viewModel: viewModel)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
+
             if viewModel.items.isEmpty {
                 EmptyResultsView()
             } else if viewModel.filteredItems.isEmpty {

@@ -101,6 +101,7 @@ struct ScanSetupView: View {
                 tint: .orange
             )
         }
+        ResumeScanBand(viewModel: viewModel)
         if let warning = viewModel.sourceWarning {
             NoticeBand(text: warning, systemImage: "exclamationmark.triangle.fill", tint: .orange)
         }
@@ -251,6 +252,33 @@ private struct SetupCard<Content: View>: View {
         .overlay {
             RoundedRectangle(cornerRadius: 14)
                 .strokeBorder(Color.primary.opacity(0.08))
+        }
+    }
+}
+
+/// Offers to continue a scan that was stopped or failed part-way.
+struct ResumeScanBand: View {
+    @ObservedObject var viewModel: RecoveryViewModel
+
+    var body: some View {
+        if let percent = viewModel.resumePercentLabel, !viewModel.isScanActive {
+            HStack(spacing: 12) {
+                Label {
+                    Text("The last scan of this drive stopped at \(percent). Resume it to search the rest, keeping what was found so far.")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                }
+                .font(.callout)
+                Spacer(minLength: 8)
+                Button("Resume Scan") { viewModel.resumeScan() }
+                    .disabled(viewModel.state == .recovering)
+                    .help("Continues with the same file types and scan depth as before")
+            }
+            .foregroundStyle(.blue)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.blue.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
         }
     }
 }

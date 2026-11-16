@@ -154,6 +154,20 @@ struct ScanRegion: Sendable {
     let range: Range<UInt64>
 }
 
+/// Where to pick a stopped scan back up, and what it had already found.
+struct ScanResume: Sendable {
+    /// Absolute offset in the source; everything below it was searched.
+    var offset: UInt64
+    /// End of the furthest file already found that starts below `offset`.
+    /// Candidates below it are inside a known file, not new ones.
+    var floor: UInt64
+    /// Start offsets of results already held. The resume offset is rewound a
+    /// little for safety, so the last few files found are met again.
+    var knownOffsets: Set<UInt64>
+    /// Fingerprints of results already held, so duplicates are still caught.
+    var fingerprints: Set<String>
+}
+
 struct ScanPlan: Sendable {
     let regions: [ScanRegion]
     let note: String?
@@ -415,6 +429,9 @@ struct ScanProgress: Sendable {
     var bytesScanned: UInt64 = 0
     var totalBytes: UInt64 = 0
     var currentPath: String = ""
+    /// Absolute offset the scan has read up to in the current source. Nil
+    /// until carving starts; a stopped scan resumes from just before it.
+    var position: UInt64? = nil
 
     var fraction: Double {
         guard totalBytes > 0 else { return 0 }

@@ -22,6 +22,18 @@ struct RecoveryManifest: Codable {
     /// False when exported before the scan finished — the list is partial.
     var scanComplete: Bool
     var entries: [Entry]
+    /// Present when the scan was stopped part-way and can be continued.
+    /// Optional, so session files saved before it existed still open.
+    var resume: Resume?
+
+    struct Resume: Codable, Equatable, Sendable {
+        /// Absolute offset in the source; everything below it was searched.
+        var offset: UInt64
+        /// How far through the scan that was, 0 to 1, for display.
+        var fraction: Double
+        var kinds: [MediaKind]
+        var fastScan: Bool
+    }
 
     struct Entry: Codable {
         var offset: UInt64

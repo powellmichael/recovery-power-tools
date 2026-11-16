@@ -566,3 +566,130 @@ private func be32(_ value: UInt32) -> [UInt8] {
         #expect(items.first?.endGuessed == true)
     }
 }
+
+@Suite struct ScanResumeTests {
+    private func jpeg(_ fill: UInt8, entropy: Int) -> [UInt8] {
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10] + [UInt8](repeating: 0x11, count: 14)
+            + [0xFF, 0xDA, 0x00, 0x04, 0x01, 0x02]
+            + [UInt8](repeating: fill, count: entropy) + [0xFF, 0xD9]
+    }
+
+    /// Stopping anywhere and resuming must give the same results as one
+    /// uninterrupted scan: nothing missed, nothing found twice, and no false
+    /// file carved out of the middle of one already found.
+    @Test func resumedScanMatchesUninterruptedScan() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 400_000)
+        // The second file holds a JPEG header inside its own image data: a
+        // resume that lands mid-file must not report that as a new file.
+        var second = jpeg(0x33, entropy: 60_000)
+        second.replaceSubrange(30_000..<30_004, with: [0xFF, 0xD8, 0xFF, 0xE0])
+        let placed: [(Int, [UInt8])] = [
+            (10_000, jpeg(0x22, entropy: 5_000)),
+            (100_000, second),
+            (250_000, jpeg(0x44, entropy: 5_000)),
+            (300_000, jpeg(0x22, entropy: 5_000)), // same bytes as the first
+        ]
+        for (offset, bytes) in placed { blob.replaceSubrange(offset..<offset + bytes.count, with: bytes) }
+
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try ScanSource(fileURL: url)
+        let plan = ScanPlan(regions: [ScanRegion(source: source, range: 0..<source.size)], note: nil)
+        let scanner = RecoveryScanner()
+        let full = try await scanner.scan(plan: plan, selectedKinds: [.jpeg], progress: { _ in }, itemFound: { _ in })
+            .sorted { $0.byteOffset < $1.byteOffset }
+        #expect(full.map(\.byteOffset) == [10_000, 100_000, 250_000, 300_000])
+        #expect(full.map(\.isDuplicate) == [false, false, false, true])
+
+        // Between files, inside the second file, and just past a file start.
+        // `heldUpTo` runs ahead of `stop` in the last case, as it does in the
+        // app, where the resume offset is rewound behind the last files found.
+        for (stop, heldUpTo) in [(50_000, 50_000), (120_000, 120_000), (250_001, 250_001), (120_000, 260_000)] as [(UInt64, UInt64)] {
+            let held = full.filter { $0.byteOffset < heldUpTo }
+            let resume = ScanResume(
+                offset: stop,
+                floor: held.filter { $0.byteOffset < stop }.map { $0.byteOffset + $0.byteLength }.max() ?? 0,
+                knownOffsets: Set(held.map(\.byteOffset)),
+                fingerprints: Set(held.compactMap(\.fingerprint))
+            )
+            let rest = try await scanner.scan(
+                plan: plan, selectedKinds: [.jpeg], resume: resume, progress: { _ in }, itemFound: { _ in }
+            )
+            let combined = (held + rest).sorted { $0.byteOffset < $1.byteOffset }
+            #expect(combined.map(\.byteOffset) == full.map(\.byteOffset), "stopped at \(stop)")
+            #expect(combined.map(\.byteLength) == full.map(\.byteLength), "stopped at \(stop)")
+            #expect(combined.map(\.isDuplicate) == full.map(\.isDuplicate), "stopped at \(stop)")
+        }
+    }
+
+    /// The same guarantee through the view model: stop, resume, and the
+    /// result list ends up identical to an uninterrupted scan.
+    @MainActor @Test func viewModelResumeCompletesTheList() async throws {
+        var blob = [UInt8](repeating: 0xAA, count: 6_000_000)
+        let offsets = [10_000, 2_000_000, 3_500_000, 5_000_000]
+        for (index, offset) in offsets.enumerated() {
+            let bytes = jpeg(UInt8(0x20 + index), entropy: 5_000)
+            blob.replaceSubrange(offset..<offset + bytes.count, with: bytes)
+        }
+        let url = try makeTempFile(Data(blob))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let model = RecoveryViewModel(recoveryLogURL: tempResumeURL(), reviewLogURL: tempResumeURL())
+        model.target = .path(url)
+        model.selectMediaPreset(.photos)
+        func waitUntilFinished() async throws {
+            for _ in 0..<500 where model.state != .finished { try await Task.sleep(for: .milliseconds(20)) }
+            #expect(model.state == .finished)
+        }
+        model.startScan()
+        try await waitUntilFinished()
+        #expect(model.items.map(\.byteOffset).sorted() == offsets.map(UInt64.init))
+        #expect(model.resumePoint == nil)
+
+        // Rewind to a scan stopped at 3 MB, holding only what lay before it.
+        model.items.removeAll { $0.byteOffset >= 3_000_000 }
+        model.state = .scanning
+        model.progress = ScanProgress(bytesScanned: 3_000_000, totalBytes: 6_000_000, currentPath: "", position: 3_000_000)
+        model.cancelScan()
+        #expect(model.resumePoint?.kinds.contains(.jpeg) == true)
+        #expect(model.items.count == 2)
+
+        model.resumeScan()
+        try await waitUntilFinished()
+        #expect(model.items.map(\.byteOffset).sorted() == offsets.map(UInt64.init))
+        #expect(model.resumePoint == nil)
+    }
+
+    @Test func resumePointSurvivesSessionFile() throws {
+        var manifest = RecoveryManifest(items: [], volumeID: 9, sourceName: "Card", scanNote: nil, scanComplete: false)
+        manifest.resume = .init(offset: 123_456_789, fraction: 0.64, kinds: [.jpeg, .video], fastScan: true)
+        let decoded = try RecoveryManifest.decode(try manifest.encoded())
+        #expect(decoded.resume == manifest.resume)
+        #expect(!decoded.scanComplete)
+    }
+
+    @MainActor @Test func stoppingAScanLeavesAResumePoint() {
+        let model = RecoveryViewModel(recoveryLogURL: tempResumeURL(), reviewLogURL: tempResumeURL())
+        model.state = .scanning
+        model.progress = ScanProgress(bytesScanned: 640, totalBytes: 1000, currentPath: "", position: 50_000_000)
+        model.cancelScan()
+        // Rewound by the safety margin, never forward.
+        #expect(model.resumePoint?.offset == 50_000_000 - 1024 * 1024)
+        #expect(model.resumePercentLabel == "64%")
+
+        // Stopped before carving reached any position: nothing to resume.
+        model.state = .scanning
+        model.progress = ScanProgress()
+        model.cancelScan()
+        #expect(model.resumePoint == nil)
+    }
+
+    @MainActor @Test func remainingTimeCountsOnlyThisRun() {
+        // 100 s to go from 50% to 75% means 100 s more, not 33 s.
+        #expect(RecoveryViewModel.remainingLabel(elapsed: 100, fraction: 0.75, startFraction: 0.5) == "About 2 min left")
+    }
+}
+
+private func tempResumeURL() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("resume-\(UUID().uuidString).json")
+}

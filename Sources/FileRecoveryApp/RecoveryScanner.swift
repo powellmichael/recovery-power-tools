@@ -5,7 +5,11 @@ import ImageIO
 /// Tracks fingerprints seen so far in one scan. Reference type so the same set
 /// spans every region; used sequentially from the scan task only.
 private final class DuplicateTracker {
-    private var seen: Set<String> = []
+    private var seen: Set<String>
+
+    init(seen: Set<String> = []) {
+        self.seen = seen
+    }
 
     /// Returns true when this fingerprint was already recorded.
     func markSeen(_ fingerprint: String?) -> Bool {
@@ -85,10 +89,15 @@ struct RecoveryScanner: Sendable {
     func scan(
         plan: ScanPlan,
         selectedKinds: Set<MediaKind>,
+        resume requestedResume: ScanResume? = nil,
         pauseGate: PauseGate? = nil,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
         itemFound: @escaping @Sendable (RecoveredItem) async -> Void
     ) async throws -> [RecoveredItem] {
+        // A resume offset is a position in one source. A folder scan reads
+        // many files, where it means nothing, so that starts over instead.
+        let firstSource = plan.regions.first?.source
+        let resume = plan.regions.allSatisfy({ $0.source === firstSource }) ? requestedResume : nil
         let totalBytes = plan.regions.reduce(UInt64(0)) { $0 + UInt64($1.range.count) }
         var allItems: [RecoveredItem] = []
         var bytesScanned: UInt64 = 0
@@ -96,7 +105,7 @@ struct RecoveryScanner: Sendable {
         // Deleted directory entries are first-class results: verify the
         // signature at each entry's data offset and emit it with its original
         // name and exact size. Carving then only adds anonymous extras.
-        let tracker = DuplicateTracker()
+        let tracker = DuplicateTracker(seen: resume?.fingerprints ?? [])
         var claimed: [RecoveredItem] = []
         if let source = plan.regions.first?.source, !plan.deletedFiles.isEmpty {
             let freeRanges = plan.regions.map(\.range).sorted { $0.lowerBound < $1.lowerBound }
@@ -119,8 +128,13 @@ struct RecoveryScanner: Sendable {
                 )
                 item.modifiedDate = entry.modified
                 item.fingerprint = fingerprint(for: item)
-                item.isDuplicate = tracker.markSeen(item.fingerprint)
                 claimed.append(item)
+                // The first run reported every directory entry before it
+                // began carving. On a resume they are rebuilt only so carving
+                // can still tell which space they occupy.
+                guard resume == nil else { continue }
+                item.isDuplicate = tracker.markSeen(item.fingerprint)
+                claimed[claimed.count - 1] = item
                 allItems.append(item)
                 await itemFound(item)
             }
@@ -128,6 +142,10 @@ struct RecoveryScanner: Sendable {
 
         for region in plan.regions {
             try Task.checkCancellation()
+            if let resume, region.range.upperBound <= resume.offset {
+                bytesScanned += UInt64(region.range.count)
+                continue
+            }
             let regionClaims = claimed.filter {
                 $0.byteOffset < region.range.upperBound && $0.byteOffset + $0.byteLength > region.range.lowerBound
             }
@@ -138,6 +156,7 @@ struct RecoveryScanner: Sendable {
                 selectedKinds: selectedKinds,
                 deletedFiles: plan.deletedFiles,
                 claimed: regionClaims,
+                resume: resume,
                 tracker: tracker,
                 pauseGate: pauseGate,
                 progress: progress,
@@ -158,6 +177,7 @@ struct RecoveryScanner: Sendable {
         selectedKinds: Set<MediaKind>,
         deletedFiles: [UInt64: DeletedFileEntry],
         claimed: [RecoveredItem],
+        resume: ScanResume? = nil,
         tracker: DuplicateTracker,
         pauseGate: PauseGate?,
         progress: @escaping @Sendable (ScanProgress) async -> Void,
@@ -166,7 +186,7 @@ struct RecoveryScanner: Sendable {
         let source = region.source
         let regionEnd = region.range.upperBound
         var items: [RecoveredItem] = []
-        var cursor = region.range.lowerBound
+        var cursor = max(region.range.lowerBound, min(resume?.offset ?? 0, regionEnd))
         // Kept as bytes, not Data: the scan buffer used to be built as Data and
         // then converted to [UInt8] for every chunk, copying 4 MB twice per read.
         var carry: [UInt8] = []
@@ -176,7 +196,7 @@ struct RecoveryScanner: Sendable {
         // stopped. So "does this overlap anything already found?" is answered by
         // one comparison against the furthest end so far, instead of a scan over
         // every item found so far. That scan was O(n²) across a whole drive.
-        var furthestItemEnd = region.range.lowerBound
+        var furthestItemEnd = max(region.range.lowerBound, resume?.floor ?? 0)
 
         while cursor < regionEnd {
             try await waitIfPaused(pauseGate)
@@ -200,6 +220,12 @@ struct RecoveryScanner: Sendable {
             ) {
                 guard candidate.byteOffset >= furthestItemEnd,
                       !overlapsExisting(candidate, in: claimed) else { continue }
+                // Already held from before the stop: step over it, but still
+                // treat its bytes as taken.
+                if let resume, resume.knownOffsets.contains(candidate.byteOffset) {
+                    furthestItemEnd = max(furthestItemEnd, candidate.byteOffset + candidate.byteLength)
+                    continue
+                }
                 var candidate = candidate
                 candidate.fingerprint = fingerprint(for: candidate)
                 candidate.isDuplicate = tracker.markSeen(candidate.fingerprint)
@@ -218,7 +244,8 @@ struct RecoveryScanner: Sendable {
                 await progress(ScanProgress(
                     bytesScanned: scannedBefore + (cursor - region.range.lowerBound),
                     totalBytes: totalBytes,
-                    currentPath: source.displayName
+                    currentPath: source.displayName,
+                    position: cursor
                 ))
             }
         }
