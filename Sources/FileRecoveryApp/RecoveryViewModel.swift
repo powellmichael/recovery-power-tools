@@ -600,6 +600,15 @@ final class RecoveryViewModel: ObservableObject {
         DeviceDiscovery.unmount(device)
     }
 
+    /// Opens a drive image made by the imaging tool as the source to scan.
+    /// Returns false, changing nothing, while a scan or recovery is running.
+    @discardableResult
+    func openImage(_ url: URL) -> Bool {
+        guard !isScanActive, state != .recovering else { return false }
+        setTarget(.path(url))
+        return true
+    }
+
     func chooseDevice(_ device: ExternalDevice) {
         setTarget(.device(device))
     }
