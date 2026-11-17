@@ -420,6 +420,68 @@ the screens in the running app beyond offscreen renders, speed on a large
 folder (hashing is single-threaded), similar-but-not-identical photos, and
 a keep-by-folder rule.
 
+## Secure Erase (phase 12, branch `phase-12-secure-erase`, stacked on phase 11)
+
+Third tool on the home screen. External drives and cards only.
+
+Files: `SecureEraser.swift` (engine), `EraseViewModel.swift`, `EraseView.swift`,
+`SecureEraserTests.swift`.
+
+**Three jobs**
+
+- **Erase Free Space.** Fills a hidden folder (`.rpt-erase-<uuid>`) at the
+  volume root with zeros in 1 GB files until the volume is full, flushes with
+  `F_FULLFSYNC`, removes the folder. Existing files are untouched.
+- **Shred Files.** Overwrites each chosen file in place with zeros, flushes,
+  renames, unlinks. Folders are emptied the same way and removed.
+- **Erase Entire Volume.** `diskutil eraseVolume` (never forced), then the
+  same fill over the new empty volume. Stopping the fill leaves a formatted,
+  usable volume and is reported as incomplete.
+
+After a free-space or volume erase the recovery scanner runs over the device
+and the result screen states how many files it can still find. That scan
+reads the raw device, so macOS asks for the password; it can be skipped.
+
+**Why a fill and not `diskutil zeroDisk` / `secureErase`:** both work without
+root on a disk image, but neither reports progress when run from a process
+(checked with and without a tty on macOS 27), which is unusable for a job
+that takes hours. The app never opens a raw device for writing.
+
+**Guards**
+
+- `SecureEraser.verify` re-reads the device from diskutil before anything
+  destructive and refuses unless it is not internal, is not on the startup
+  disk, and still has the size and volume name the user confirmed. BSD
+  identifiers are reused, so "disk4" may not be the drive that was listed.
+- Shred checks every file's volume and refuses anything not on an external
+  disk; refused files are reported and never opened.
+- A whole-volume erase requires typing the volume name.
+- The app takes a power assertion for the duration.
+
+**Limits, all stated in the UI**
+
+- One pass of zeros. No multi-pass options.
+- Flash media keeps spare memory no software can reach; shredding in place is
+  not a guarantee there, and the UI points to the volume erase.
+- Free-space erase leaves the names of deleted files in directory entries;
+  contents are gone.
+- The volume erase overwrites the space files can occupy, not reserved
+  sectors or alignment gaps.
+- Not offered: APFS containers, unformatted partitions, cards with no
+  partition table, NTFS for free-space erase (read-only on macOS).
+
+**Unverified**
+
+- Every test runs on a disk image. No erase has been run on a real drive, so
+  whether `diskutil eraseVolume` needs any extra permission on real external
+  hardware is unconfirmed.
+- On a disk image the format alone already discards old data, so the volume
+  test proves the flow, not the overwrite. The overwrite is proved by the
+  free-space test, which fails when the fill is disabled (mutation checked).
+- The working, result and confirmation screens have not been seen in the
+  running app; only the three setup screens were rendered offscreen.
+- FAT32 and Mac OS Extended as target formats are untested.
+
 ## Open UI Issues
 
 None currently open.

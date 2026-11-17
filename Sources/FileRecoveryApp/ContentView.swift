@@ -39,11 +39,13 @@ enum AppRoute: Equatable {
     case home
     case recover
     case duplicates
+    case erase
 }
 
 struct ContentView: View {
     @ObservedObject var viewModel: RecoveryViewModel
     @StateObject private var duplicates = DuplicatesViewModel()
+    @StateObject private var erase = EraseViewModel()
     @State private var route: AppRoute = .home
     @State private var showsLiveResults = false
     /// True while the user is back on the setup step with results still held,
@@ -59,11 +61,17 @@ struct ContentView: View {
         Group {
             switch route {
             case .home:
-                HomeView(openRecover: { route = .recover }, openDuplicates: { route = .duplicates })
+                HomeView(
+                    openRecover: { route = .recover },
+                    openDuplicates: { route = .duplicates },
+                    openErase: { route = .erase }
+                )
             case .recover:
                 recoverFlow
             case .duplicates:
                 DuplicatesView(viewModel: duplicates) { route = .home }
+            case .erase:
+                EraseView(viewModel: erase) { route = .home }
             }
         }
         .onChange(of: viewModel.isScanActive) { _, active in
