@@ -31,10 +31,14 @@ struct EraseView: View {
     private var setup: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                Button(action: showHome) {
-                    Label("All Tools", systemImage: "chevron.backward")
+                HStack {
+                    Button(action: showHome) {
+                        Label("All Tools", systemImage: "chevron.backward")
+                    }
+                    .buttonStyle(.link)
+                    Spacer()
+                    HelpLink(topic: "erase")
                 }
-                .buttonStyle(.link)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Secure erase")

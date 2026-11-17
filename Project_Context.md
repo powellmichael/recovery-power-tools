@@ -516,6 +516,83 @@ Files: `DriveImager.swift` (engine), `ImagingViewModel.swift`,
   engine, including a simulated bad block. The copying and result screens and
   the hand-off to Recover have not been seen in the running app.
 
+## Verified Copy (phase 14, branch `phase-14-verified-copy`, stacked on phase 13)
+
+Fifth tool on the home screen: copy a camera card (any folder) to one or two
+destinations and prove each copy before the card is formatted.
+
+Files: `VerifiedCopier.swift` (engine), `CardCopyViewModel.swift`,
+`CardCopyView.swift`, `VerifiedCopierTests.swift`.
+
+- Each file is SHA-256 hashed as it is read from the source and written to
+  every destination in the same pass. Each copy is then flushed
+  (`F_FULLFSYNC`) and read back with the file cache off, and its hash
+  compared.
+- Files go into a new folder per destination, named after the source and
+  today's date; an existing folder is never written into.
+- Folder structure and file dates are kept.
+- A failed file is reported and the rest carry on. The result screen only
+  says the card is safe to format when every file verified on every
+  destination (`CopyReport.everythingVerified`).
+- `SHA256SUMS.txt` is written beside each copy in `shasum` format, listing
+  only verified files, so `shasum -a 256 -c SHA256SUMS.txt` re-checks later.
+- The view model refuses a destination on the same volume as the source.
+  The engine does not, so tests can run inside one temp directory.
+
+**Limits**
+
+- Hidden files and symlinks are not copied.
+- The read-back turns caching off but does not unmount the drive, so it is
+  not a guarantee the bytes came from the physical medium.
+- A stopped copy removes the file in progress and keeps the finished ones;
+  there is no resume.
+- Two destinations on the same physical disk are allowed.
+
+**Unverified**
+
+- No real card has been copied. Checked with temp folders, a corrupted-copy
+  test, and one small real run through the screens whose checksum file
+  `shasum` accepted. Speed on a full card is unmeasured.
+
+## Launch Readiness (phase 15, branch `phase-15-launch-readiness`, stacked on phase 14)
+
+Files: `HelpContent.swift`, `HelpView.swift`, `CrashReports.swift`,
+`LaunchReadinessTests.swift`.
+
+**First-run guidance.** `WelcomeSheet` is shown once (`hasSeenWelcome` in
+user defaults): stop using the drive, recover to a different drive, copy a
+failing drive first, scanning is free and read-only. Help > Show Welcome
+Guide brings it back.
+
+**Help.** A Help window (`Window` scene, id `help`) with one page per tool,
+a Before You Start page and Why Can't I Find My File?. The text is Swift data
+in `HelpContent.topics`, not a help book, so it sits beside the behaviour it
+describes. The page shown is the `helpTopic` default; `HelpLink(topic:)` sets
+it and opens the window. Each tool's first screen has a Help link, and an
+empty scan links to Why Can't I Find My File?. The Help menu is replaced
+(Cmd-?). Help text must be kept in step with the tools.
+
+**Crash reporting (opt-in, no server).** macOS writes
+`<process>-<date>.ips` to `~/Library/Logs/DiagnosticReports` for every crash
+(naming confirmed by crashing a throwaway program on macOS 27). When the user
+has opted in (welcome sheet or Settings; off by default), the next launch
+finds reports newer than the last check and asks. Send Report opens an email
+in the user's mail app with the report attached, addressed to
+`RPTSupportEmail` from Info.plist (`SUPPORT_EMAIL=... make app`). With no
+address in the build, only Show Report in Finder is offered. Crashes from
+before opting in are never offered, and each report is offered once.
+
+**Not done from the M6 list:** the VoiceOver and keyboard-only passes, and a
+beta with real users.
+
+**Unverified**
+
+- The welcome sheet, Help window, Help menu and crash prompt have not been
+  seen in the running app; the sheet and a help page were rendered offscreen.
+- The email hand-off (`NSSharingService` compose) has not been run.
+- Whether the crash report is still named after the process inside the
+  signed app bundle (executable `FileRecovery`) is assumed, not checked.
+
 ## Open UI Issues
 
 None currently open.

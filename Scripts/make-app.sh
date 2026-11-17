@@ -8,6 +8,7 @@
 #   SIGN_IDENTITY   "-" for an ad-hoc signature (local testing only), or a
 #                   "Developer ID Application: …" identity for distribution
 #   PURCHASE_URL    store page for the "Buy a Licence" link (optional)
+#   SUPPORT_EMAIL   address crash reports are sent to, if the user opts in (optional)
 #
 # The licence public key is read from license-public.key in the repository
 # root. Without it the app is built with recovery unlocked.
@@ -20,6 +21,7 @@ VERSION="${VERSION:-1.0.0}"
 BUILD="${BUILD:-1}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 PURCHASE_URL="${PURCHASE_URL:-}"
+SUPPORT_EMAIL="${SUPPORT_EMAIL:-}"
 APP="dist/$APP_NAME.app"
 
 LICENSE_KEY=""
@@ -53,6 +55,7 @@ set_string LSApplicationCategoryType public.app-category.utilities
 set_string CFBundleIconFile AppIcon
 set_string RPTLicensePublicKey "$LICENSE_KEY"
 set_string RPTPurchaseURL "$PURCHASE_URL"
+set_string RPTSupportEmail "$SUPPORT_EMAIL"
 plutil -insert NSHighResolutionCapable -bool true "$PLIST"
 
 # Hardened runtime is required for notarization. No entitlements: the app is

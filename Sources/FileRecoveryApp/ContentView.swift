@@ -41,6 +41,7 @@ enum AppRoute: Equatable {
     case duplicates
     case erase
     case image
+    case cardCopy
 }
 
 struct ContentView: View {
@@ -48,12 +49,16 @@ struct ContentView: View {
     @StateObject private var duplicates = DuplicatesViewModel()
     @StateObject private var erase = EraseViewModel()
     @StateObject private var imaging = ImagingViewModel()
+    @StateObject private var cardCopy = CardCopyViewModel()
     @State private var route: AppRoute = .home
     @State private var showsLiveResults = false
     /// True while the user is back on the setup step with results still held,
     /// so "Scan Again" doesn't have to throw the current results away first.
     @State private var showsScanSetup = false
     @AppStorage("appearance") private var appearanceRaw = AppearancePreference.system.rawValue
+    @AppStorage("hasSeenWelcome") private var hasSeenWelcome = false
+    /// Crash reports found at launch, waiting for the user's decision.
+    @State private var crashReports: [URL] = []
 
     private var appearance: AppearancePreference {
         AppearancePreference(rawValue: appearanceRaw) ?? .system
@@ -67,7 +72,8 @@ struct ContentView: View {
                     openRecover: { route = .recover },
                     openDuplicates: { route = .duplicates },
                     openErase: { route = .erase },
-                    openImage: { route = .image }
+                    openImage: { route = .image },
+                    openCardCopy: { route = .cardCopy }
                 )
             case .recover:
                 recoverFlow
@@ -75,6 +81,8 @@ struct ContentView: View {
                 DuplicatesView(viewModel: duplicates) { route = .home }
             case .erase:
                 EraseView(viewModel: erase) { route = .home }
+            case .cardCopy:
+                CardCopyView(viewModel: cardCopy) { route = .home }
             case .image:
                 ImagingView(viewModel: imaging, showHome: { route = .home }) { url in
                     guard viewModel.openImage(url) else { return false }
@@ -108,6 +116,31 @@ struct ContentView: View {
             set: { viewModel.showLicensePrompt = $0 }
         )) {
             LicenseSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: Binding(get: { !hasSeenWelcome }, set: { hasSeenWelcome = !$0 })) {
+            WelcomeSheet { hasSeenWelcome = true }
+        }
+        .task {
+            // Only finds anything if the user opted in.
+            crashReports = CrashReports.pending()
+        }
+        .alert(
+            "Recovery Power Tools quit unexpectedly last time",
+            isPresented: Binding(get: { !crashReports.isEmpty && hasSeenWelcome }, set: { if !$0 { crashReports = [] } })
+        ) {
+            if CrashReports.supportEmail != nil {
+                Button("Send Report…") {
+                    if !CrashReports.compose(crashReports) {
+                        NSWorkspace.shared.activateFileViewerSelecting(crashReports)
+                    }
+                }
+            }
+            Button("Show Report in Finder") { NSWorkspace.shared.activateFileViewerSelecting(crashReports) }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text(CrashReports.supportEmail != nil
+                 ? "Sending the report helps fix the problem. It opens as an email you can read before sending. It describes the app and your Mac, not your files."
+                 : "macOS saved a report of what went wrong. You can look at it, and attach it if you contact support.")
         }
         .preferredColorScheme(appearance.colorScheme)
     }
