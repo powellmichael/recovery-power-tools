@@ -56,6 +56,9 @@ struct ContentView: View {
     /// so "Scan Again" doesn't have to throw the current results away first.
     @State private var showsScanSetup = false
     @AppStorage("appearance") private var appearanceRaw = AppearancePreference.system.rawValue
+    @AppStorage("hasSeenWelcome") private var hasSeenWelcome = false
+    /// Crash reports found at launch, waiting for the user's decision.
+    @State private var crashReports: [URL] = []
 
     private var appearance: AppearancePreference {
         AppearancePreference(rawValue: appearanceRaw) ?? .system
@@ -113,6 +116,31 @@ struct ContentView: View {
             set: { viewModel.showLicensePrompt = $0 }
         )) {
             LicenseSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: Binding(get: { !hasSeenWelcome }, set: { hasSeenWelcome = !$0 })) {
+            WelcomeSheet { hasSeenWelcome = true }
+        }
+        .task {
+            // Only finds anything if the user opted in.
+            crashReports = CrashReports.pending()
+        }
+        .alert(
+            "Recovery Power Tools quit unexpectedly last time",
+            isPresented: Binding(get: { !crashReports.isEmpty && hasSeenWelcome }, set: { if !$0 { crashReports = [] } })
+        ) {
+            if CrashReports.supportEmail != nil {
+                Button("Send Report…") {
+                    if !CrashReports.compose(crashReports) {
+                        NSWorkspace.shared.activateFileViewerSelecting(crashReports)
+                    }
+                }
+            }
+            Button("Show Report in Finder") { NSWorkspace.shared.activateFileViewerSelecting(crashReports) }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text(CrashReports.supportEmail != nil
+                 ? "Sending the report helps fix the problem. It opens as an email you can read before sending. It describes the app and your Mac, not your files."
+                 : "macOS saved a report of what went wrong. You can look at it, and attach it if you contact support.")
         }
         .preferredColorScheme(appearance.colorScheme)
     }
