@@ -6,6 +6,7 @@ import SwiftUI
 struct HomeView: View {
     let openRecover: () -> Void
     let openDuplicates: () -> Void
+    let openErase: () -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 270, maximum: 360), spacing: 18)]
 
@@ -44,7 +45,7 @@ struct HomeView: View {
                             detail: "Erase an external drive or card so its files cannot be recovered.",
                             systemImage: "lock.shield",
                             tint: .red,
-                            action: nil
+                            action: openErase
                         )
                     }
                 }

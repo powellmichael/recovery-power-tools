@@ -158,7 +158,7 @@ enum DeviceDiscovery {
         )
     }
 
-    private static func diskutilPlist(_ arguments: [String]) -> [String: Any]? {
+    static func diskutilPlist(_ arguments: [String]) -> [String: Any]? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
         process.arguments = arguments
