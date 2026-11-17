@@ -174,7 +174,9 @@ struct EraseView: View {
             }
 
             ForEach(viewModel.candidates) { device in
-                deviceRow(device)
+                DeviceChoiceRow(device: device, selected: viewModel.selectedDeviceID == device.id) {
+                    viewModel.select(device)
+                }
             }
 
             Text(viewModel.job == .freeSpace
@@ -194,40 +196,6 @@ struct EraseView: View {
                 .padding(.top, 4)
             }
         }
-    }
-
-    private func deviceRow(_ device: ExternalDevice) -> some View {
-        let selected = viewModel.selectedDeviceID == device.id
-        return Button {
-            viewModel.select(device)
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                Image(systemName: "externaldrive")
-                    .font(.title3)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(device.userFacingName)
-                        .font(.callout.weight(.semibold))
-                        .lineLimit(1)
-                    Text("\(device.filesystemLabel) · \(ByteCountFormatter.string(fromByteCount: Int64(device.size), countStyle: .file)) · \(device.physicalName ?? device.identifier)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                selected ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.045),
-                in: RoundedRectangle(cornerRadius: 9)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 9))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(device.userFacingName), \(device.filesystemLabel)")
-        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private var fileChooser: some View {
@@ -401,5 +369,44 @@ struct EraseView: View {
         }
         .padding(48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// One selectable drive or volume in a list. Shared by the tools that act on
+/// a whole device.
+struct DeviceChoiceRow: View {
+    let device: ExternalDevice
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                Image(systemName: "externaldrive")
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(device.userFacingName)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    Text("\(device.isWholeDisk ? "Entire drive" : device.filesystemLabel) · \(ByteCountFormatter.string(fromByteCount: Int64(device.size), countStyle: .file)) · \(device.physicalName ?? device.identifier)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selected ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.045),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(device.userFacingName), \(device.isWholeDisk ? "entire drive" : device.filesystemLabel)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

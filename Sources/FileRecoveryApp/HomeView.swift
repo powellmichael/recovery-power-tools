@@ -7,6 +7,7 @@ struct HomeView: View {
     let openRecover: () -> Void
     let openDuplicates: () -> Void
     let openErase: () -> Void
+    let openImage: () -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 270, maximum: 360), spacing: 18)]
 
@@ -32,6 +33,13 @@ struct HomeView: View {
                             systemImage: "arrow.uturn.backward.circle.fill",
                             tint: .accentColor,
                             action: openRecover
+                        )
+                        ToolCard(
+                            title: "Copy a Drive",
+                            detail: "Copy a failing drive or card into one file, then recover from the copy.",
+                            systemImage: "externaldrive.badge.plus",
+                            tint: .teal,
+                            action: openImage
                         )
                         ToolCard(
                             title: "Find Duplicates",

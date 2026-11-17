@@ -482,6 +482,40 @@ that takes hours. The app never opens a raw device for writing.
   running app; only the three setup screens were rendered offscreen.
 - FAT32 and Mac OS Extended as target formats are untested.
 
+## Copy a Drive (phase 13, branch `phase-13-drive-imaging`)
+
+Fourth tool on the home screen: copy a drive or volume, byte for byte, into
+one `.img` file, then recover from the file. A failing drive is read once.
+
+Files: `DriveImager.swift` (engine), `ImagingViewModel.swift`,
+`ImagingView.swift`, `DriveImagerTests.swift`.
+
+- Reads through `ScanSource`, so it uses the same read-only `authopen` access
+  and the same bad-sector salvage as a scan: unreadable blocks become zeros
+  and are counted, and the copy carries on.
+- The destination is refused if it is on the drive being copied, has too
+  little free space, or is FAT32 and the image would be 4 GB or more.
+- Stopping, or losing the source part-way, keeps the partial image and says
+  how far it got. Only a destination failure is an error.
+- "Scan This Image" hands the file to Recover (`RecoveryViewModel.openImage`),
+  which already scans image files. It is refused while Recover is busy.
+- `DeviceChoiceRow` (in `EraseView.swift`) is the drive row shared with
+  Secure Erase.
+
+**Limits**
+
+- No resume: a stopped copy starts over.
+- The image is the full size of the drive; empty space is not skipped.
+- No checksum pass afterwards.
+- The scanner does not read partition tables, so an image of an entire drive
+  is carved without original filenames. The screen says to pick a volume.
+
+**Unverified**
+
+- No real drive has been imaged: the tests copy a file through the same
+  engine, including a simulated bad block. The copying and result screens and
+  the hand-off to Recover have not been seen in the running app.
+
 ## Open UI Issues
 
 None currently open.
