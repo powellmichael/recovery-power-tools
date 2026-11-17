@@ -62,7 +62,16 @@ struct FileRecoveryApp: App {
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                     .disabled(viewModel.target == nil || !viewModel.canReturnToSourceSelection)
             }
+
+            CommandGroup(replacing: .help) {
+                HelpCommands()
+            }
         }
+
+        Window("Recovery Power Tools Help", id: "help") {
+            HelpView()
+        }
+        .defaultSize(width: 860, height: 620)
 
         Settings {
             SettingsView(viewModel: viewModel)
@@ -75,6 +84,7 @@ struct FileRecoveryApp: App {
 struct SettingsView: View {
     @ObservedObject var viewModel: RecoveryViewModel
     @AppStorage("appearance") private var appearanceRaw = AppearancePreference.system.rawValue
+    @AppStorage(CrashReports.enabledKey) private var crashReports = false
 
     var body: some View {
         Form {
@@ -87,9 +97,35 @@ struct SettingsView: View {
             .pickerStyle(.inline)
 
             LicenseSettingsSection(viewModel: viewModel)
+
+            Section("Crash Reports") {
+                Toggle("Offer to send a report if the app quits unexpectedly", isOn: $crashReports)
+                Text("When this is on, the app looks for its own crash report the next time it opens and asks whether you want to send it. Nothing is sent without you choosing to. A report describes the app and your Mac (model, macOS version, and folder paths, which include your user name). It does not contain your files.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 420)
         .preferredColorScheme((AppearancePreference(rawValue: appearanceRaw) ?? .system).colorScheme)
+    }
+}
+
+/// The Help menu. A view, so it can reach openWindow.
+private struct HelpCommands: View {
+    @Environment(\.openWindow) private var openWindow
+    @AppStorage("helpTopic") private var topicID = HelpContent.topics[0].id
+    @AppStorage("hasSeenWelcome") private var hasSeenWelcome = false
+
+    var body: some View {
+        Button("Recovery Power Tools Help") { openWindow(id: "help") }
+            .keyboardShortcut("?")
+        Button("Why Can't I Find My File?") {
+            topicID = HelpContent.cannotFindID
+            openWindow(id: "help")
+        }
+        Divider()
+        Button("Show Welcome Guide") { hasSeenWelcome = false }
     }
 }

@@ -69,13 +69,17 @@ struct ScanSetupView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Button {
-                viewModel.returnToSourceSelection()
-            } label: {
-                Label("Choose Another Source", systemImage: "chevron.backward")
+            HStack {
+                Button {
+                    viewModel.returnToSourceSelection()
+                } label: {
+                    Label("Choose Another Source", systemImage: "chevron.backward")
+                }
+                .buttonStyle(.link)
+                .disabled(!viewModel.canReturnToSourceSelection)
+                Spacer()
+                HelpLink(topic: "recover")
             }
-            .buttonStyle(.link)
-            .disabled(!viewModel.canReturnToSourceSelection)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Set up your scan")
@@ -100,6 +104,7 @@ struct ScanSetupView: View {
                 systemImage: "magnifyingglass",
                 tint: .orange
             )
+            HelpLink(topic: HelpContent.cannotFindID, title: "Why can't I find my file?")
         }
         ResumeScanBand(viewModel: viewModel)
         if let warning = viewModel.sourceWarning {

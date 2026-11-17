@@ -554,6 +554,45 @@ Files: `VerifiedCopier.swift` (engine), `CardCopyViewModel.swift`,
   test, and one small real run through the screens whose checksum file
   `shasum` accepted. Speed on a full card is unmeasured.
 
+## Launch Readiness (phase 15, branch `phase-15-launch-readiness`, stacked on phase 14)
+
+Files: `HelpContent.swift`, `HelpView.swift`, `CrashReports.swift`,
+`LaunchReadinessTests.swift`.
+
+**First-run guidance.** `WelcomeSheet` is shown once (`hasSeenWelcome` in
+user defaults): stop using the drive, recover to a different drive, copy a
+failing drive first, scanning is free and read-only. Help > Show Welcome
+Guide brings it back.
+
+**Help.** A Help window (`Window` scene, id `help`) with one page per tool,
+a Before You Start page and Why Can't I Find My File?. The text is Swift data
+in `HelpContent.topics`, not a help book, so it sits beside the behaviour it
+describes. The page shown is the `helpTopic` default; `HelpLink(topic:)` sets
+it and opens the window. Each tool's first screen has a Help link, and an
+empty scan links to Why Can't I Find My File?. The Help menu is replaced
+(Cmd-?). Help text must be kept in step with the tools.
+
+**Crash reporting (opt-in, no server).** macOS writes
+`<process>-<date>.ips` to `~/Library/Logs/DiagnosticReports` for every crash
+(naming confirmed by crashing a throwaway program on macOS 27). When the user
+has opted in (welcome sheet or Settings; off by default), the next launch
+finds reports newer than the last check and asks. Send Report opens an email
+in the user's mail app with the report attached, addressed to
+`RPTSupportEmail` from Info.plist (`SUPPORT_EMAIL=... make app`). With no
+address in the build, only Show Report in Finder is offered. Crashes from
+before opting in are never offered, and each report is offered once.
+
+**Not done from the M6 list:** the VoiceOver and keyboard-only passes, and a
+beta with real users.
+
+**Unverified**
+
+- The welcome sheet, Help window, Help menu and crash prompt have not been
+  seen in the running app; the sheet and a help page were rendered offscreen.
+- The email hand-off (`NSSharingService` compose) has not been run.
+- Whether the crash report is still named after the process inside the
+  signed app bundle (executable `FileRecovery`) is assumed, not checked.
+
 ## Open UI Issues
 
 None currently open.
