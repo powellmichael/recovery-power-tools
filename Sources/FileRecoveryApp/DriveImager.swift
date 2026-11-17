@@ -60,7 +60,7 @@ enum DriveImager {
         if type == "msdos", device.size >= 4 * 1024 * 1024 * 1024 { throw ImagingError.fileTooLarge }
         // An image being replaced gives its space back.
         let replaced = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0
-        let available = UInt64(fs.f_bavail) * UInt64(fs.f_bsize) + (replaced ?? 0)
+        let available = UInt64(fs.f_bavail) * UInt64(fs.f_bsize) + replaced
         guard available >= device.size else {
             throw ImagingError.notEnoughSpace(needed: device.size, available: available)
         }
