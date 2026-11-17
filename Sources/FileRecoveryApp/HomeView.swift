@@ -8,6 +8,7 @@ struct HomeView: View {
     let openDuplicates: () -> Void
     let openErase: () -> Void
     let openImage: () -> Void
+    let openCardCopy: () -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 270, maximum: 360), spacing: 18)]
 
@@ -40,6 +41,13 @@ struct HomeView: View {
                             systemImage: "externaldrive.badge.plus",
                             tint: .teal,
                             action: openImage
+                        )
+                        ToolCard(
+                            title: "Verified Copy",
+                            detail: "Copy a camera card to one or two drives and confirm every file before you format it.",
+                            systemImage: "checkmark.seal",
+                            tint: .green,
+                            action: openCardCopy
                         )
                         ToolCard(
                             title: "Find Duplicates",
