@@ -5,6 +5,7 @@ import SwiftUI
 /// but they cannot be opened — a card that leads nowhere is worse than none.
 struct HomeView: View {
     let openRecover: () -> Void
+    let openDuplicates: () -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 270, maximum: 360), spacing: 18)]
 
@@ -36,7 +37,7 @@ struct HomeView: View {
                             detail: "Find identical copies of files taking up space, and choose which to keep.",
                             systemImage: "square.on.square",
                             tint: .purple,
-                            action: nil
+                            action: openDuplicates
                         )
                         ToolCard(
                             title: "Secure Erase",

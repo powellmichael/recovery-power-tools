@@ -38,10 +38,12 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
 enum AppRoute: Equatable {
     case home
     case recover
+    case duplicates
 }
 
 struct ContentView: View {
     @ObservedObject var viewModel: RecoveryViewModel
+    @StateObject private var duplicates = DuplicatesViewModel()
     @State private var route: AppRoute = .home
     @State private var showsLiveResults = false
     /// True while the user is back on the setup step with results still held,
@@ -57,9 +59,11 @@ struct ContentView: View {
         Group {
             switch route {
             case .home:
-                HomeView { route = .recover }
+                HomeView(openRecover: { route = .recover }, openDuplicates: { route = .duplicates })
             case .recover:
                 recoverFlow
+            case .duplicates:
+                DuplicatesView(viewModel: duplicates) { route = .home }
             }
         }
         .onChange(of: viewModel.isScanActive) { _, active in
