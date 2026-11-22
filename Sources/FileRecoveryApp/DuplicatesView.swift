@@ -1,5 +1,7 @@
 import AppKit
 import QuickLook
+import QuickLookThumbnailing
+import UniformTypeIdentifiers
 import SwiftUI
 
 /// Find Duplicates: choose folders, compare, then pick which copies go to
@@ -211,7 +213,15 @@ struct DuplicatesView: View {
                                 row(file, in: group)
                             }
                         } header: {
-                            Text("\(group.files.count) identical copies · \(ByteCountFormatter.string(fromByteCount: Int64(group.size), countStyle: .file)) each")
+                            HStack(spacing: 10) {
+                                // The copies are identical, so one picture
+                                // stands for the whole group.
+                                if let sample = viewModel.suggestedKeeper(in: group) ?? group.files.first {
+                                    DuplicateThumbnail(url: sample.url)
+                                }
+                                Text("\(group.files.count) identical copies · \(ByteCountFormatter.string(fromByteCount: Int64(group.size), countStyle: .file)) each")
+                            }
+                            .padding(.vertical, 2)
                         }
                     }
                 }
@@ -368,5 +378,43 @@ struct DuplicatesView: View {
         .background((report.failures.isEmpty ? Color.green : Color.orange).opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+}
+
+/// A Quick Look thumbnail of one file, with the file's icon until it loads
+/// or when the file type has no preview.
+private struct DuplicateThumbnail: View {
+    let url: URL
+    @State private var image: NSImage?
+    private static let side: CGFloat = 48
+    /// Scrolling a long list back and forth should not redraw every picture.
+    private static let cache = NSCache<NSURL, NSImage>()
+
+    var body: some View {
+        Image(nsImage: image ?? NSWorkspace.shared.icon(forFile: url.path))
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(width: Self.side, height: Self.side)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .accessibilityHidden(true)
+            .task(id: url) {
+                // A thumbnail of a text file or a spreadsheet is a blank
+                // page at this size; the file's icon says more.
+                guard let type = UTType(filenameExtension: url.pathExtension),
+                      type.conforms(to: .image) || type.conforms(to: .audiovisualContent) || type.conforms(to: .pdf) else { return }
+                if let cached = Self.cache.object(forKey: url as NSURL) {
+                    image = cached
+                    return
+                }
+                let request = QLThumbnailGenerator.Request(
+                    fileAt: url,
+                    size: CGSize(width: Self.side, height: Self.side),
+                    scale: NSScreen.main?.backingScaleFactor ?? 2,
+                    representationTypes: .thumbnail
+                )
+                guard let thumbnail = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request) else { return }
+                Self.cache.setObject(thumbnail.nsImage, forKey: url as NSURL)
+                image = thumbnail.nsImage
+            }
     }
 }
